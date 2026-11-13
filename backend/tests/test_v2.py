@@ -183,3 +183,88 @@ def test_export_zip_roundtrip():
     from app.paths import project_dir
     assert _tree(project_dir(m["id"])) == _tree(d)
     assert m["main"] == "main.tex"
+
+
+def test_pdf_survives_fatal_errors():
+    """A fatal error deletes TeX's output PDF; the viewer must keep getting the last good one."""
+    p = c.post("/api/projects", json={"name": "Fatal", "template": "blank", "lang": "en"}).json()
+    pid = p["id"]
+    good = "\\documentclass{article}\n\\begin{document}\nHello\\newpage World\n\\end{document}\n"
+    c.put(f"/api/projects/{pid}/file", json={"path": "main.tex", "content": good})
+    r = c.post(f"/api/projects/{pid}/compile", json={}).json()
+    assert r["ok"] and r["pdf"] and r["pdf_updated"]
+    pdf1 = c.get(f"/api/projects/{pid}/pdf").content
+    assert pdf1.startswith(b"%PDF-")
+    # \input of a missing file: Emergency stop, pdfTeX removes the output PDF.
+    bad = good.replace("World", "\\input{nofile} World")
+    c.put(f"/api/projects/{pid}/file", json={"path": "main.tex", "content": bad})
+    r = c.post(f"/api/projects/{pid}/compile", json={}).json()
+    assert not r["ok"] and r["pdf"] and r["pdf_updated"] is False
+    assert c.get(f"/api/projects/{pid}/pdf").content == pdf1
+    assert c.get(f"/api/projects/{pid}/pdf/download").status_code == 200
+    # SyncTeX still answers against the published copy.
+    v = c.get(f"/api/projects/{pid}/synctex/view", params={"file": "main.tex", "line": 3})
+    assert v.status_code == 200 and v.json()["page"] == 1
+    e = c.get(f"/api/projects/{pid}/synctex/edit", params={"page": 1, "x": 150, "y": 130})
+    assert e.status_code == 200 and e.json()["file"] == "main.tex"
+    # Fixed again: a new PDF is published.
+    c.put(f"/api/projects/{pid}/file", json={"path": "main.tex", "content": good.replace("World", "Again")})
+    r = c.post(f"/api/projects/{pid}/compile", json={}).json()
+    assert r["ok"] and r["pdf_updated"]
+    assert c.get(f"/api/projects/{pid}/pdf").content != pdf1
+
+
+def test_pdf_published_lazily_for_old_builds():
+    """Projects compiled before the .view copy existed still serve their PDF."""
+    p = c.post("/api/projects", json={"name": "Old build", "template": "blank", "lang": "en"}).json()
+    from app.paths import project_dir
+    b = project_dir(p["id"]) / ".build"
+    b.mkdir()
+    (b / "main.pdf").write_bytes(b"%PDF-1.5\n" + b"x" * 100 + b"\n%%EOF\n")
+    r = c.get(f"/api/projects/{p['id']}/pdf")
+    assert r.status_code == 200 and r.content.startswith(b"%PDF-")
+    assert (b / ".view" / "main.pdf").exists()
+    # With nothing better available, a truncated PDF (TeX stopped by a fatal error) is shown.
+    p2 = c.post("/api/projects", json={"name": "Truncated", "template": "blank", "lang": "en"}).json()
+    b2 = project_dir(p2["id"]) / ".build"
+    b2.mkdir()
+    (b2 / "main.pdf").write_bytes(b"%PDF-1.5\n" + b"x" * 100)
+    assert c.get(f"/api/projects/{p2['id']}/pdf").status_code == 200
+    assert (b2 / ".view" / "main.partial").exists()
+    # Not a PDF at all: nothing to show.
+    p3 = c.post("/api/projects", json={"name": "Garbage", "template": "blank", "lang": "en"}).json()
+    b3 = project_dir(p3["id"]) / ".build"
+    b3.mkdir()
+    (b3 / "main.pdf").write_bytes(b"garbage" * 20)
+    assert c.get(f"/api/projects/{p3['id']}/pdf").status_code == 404
+
+
+def test_partial_pdf_never_replaces_complete():
+    from app.compiler import _publish
+    from app.paths import project_dir
+    p = c.post("/api/projects", json={"name": "Partial", "template": "blank", "lang": "en"}).json()
+    b = project_dir(p["id"]) / ".build"
+    b.mkdir()
+    full = b"%PDF-1.5\n" + b"x" * 100 + b"\n%%EOF\n"
+    trunc = b"%PDF-1.5\n" + b"y" * 100
+    (b / "main.pdf").write_bytes(trunc)
+    assert _publish(b, "main") == "partial"
+    (b / "main.pdf").write_bytes(trunc + b"z")
+    assert _publish(b, "main") == "partial"  # partial may replace partial
+    (b / "main.pdf").write_bytes(full)
+    assert _publish(b, "main") == "complete" and not (b / ".view" / "main.partial").exists()
+    (b / "main.pdf").write_bytes(trunc)
+    assert _publish(b, "main") is None
+    assert (b / ".view" / "main.pdf").read_bytes() == full
+
+
+def test_log_read_from_latexmkrc_aux_dir():
+    """A project .latexmkrc with $aux_dir puts the log elsewhere; errors must still be reported."""
+    p = c.post("/api/projects", json={"name": "Auxdir", "template": "blank", "lang": "en"}).json()
+    pid = p["id"]
+    c.put(f"/api/projects/{pid}/file", json={"path": ".latexmkrc", "content": "$aux_dir = '.aux';\n"})
+    c.put(f"/api/projects/{pid}/file", json={"path": "main.tex", "content": "\\documentclass{article}\n\\begin{document}\nA & B\n\\end{document}\n"})
+    r = c.post(f"/api/projects/{pid}/compile", json={}).json()
+    assert not r["ok"]
+    assert any("alignment tab" in e["message"] and e.get("line") == 3 for e in r["errors"]), r["errors"]
+    assert "alignment tab" in c.get(f"/api/projects/{pid}/log").text

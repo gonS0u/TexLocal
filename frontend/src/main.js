@@ -498,14 +498,21 @@ class ProjectView {
       this.statusEl.className = `status ${r.ok ? 'ok' : r.errors.length ? 'err' : 'warn'}`;
       this.statusEl.textContent = r.ok ? `✓ ${r.duration}s` : `✗ ${t('{n} error(s)', { n: r.errors.length })}`;
       this.statusEl.title = r.ok ? t('Compiled successfully') : t('Show log');
+      if (r.pdf && r.pdf_updated === false) this.statusEl.title += ' — ' + t('The PDF was not updated: showing the last successful version.');
+      if (r.pdf_partial) this.statusEl.title += ' — ' + t('The PDF is incomplete: compilation stopped at the first error.');
       this.statusEl.onclick = () => this.setLogOpen(true);
       this.editor.setDiagnostics([
         ...r.errors.filter((e) => !e.external).map((e) => ({ ...e, file: e.file || r.main, severity: 'error' })),
         ...r.warnings.filter((w) => w.file && !w.external).map((w) => ({ ...w, severity: 'warning' })),
       ]);
-      if (r.pdf) {
+      // Reload whenever the published PDF differs from the one on screen. After a fatal
+      // error the server keeps the last good PDF (same mtime), so the view stays as it is.
+      if (r.pdf && (r.pdf_mtime !== this.pdfMtime || !this.pdf.numPages)) {
         this.chan.postMessage({ type: 'pdf', mtime: r.pdf_mtime });
-        if (!this.detached) await this.pdf.load(api.pdfUrl(this.pid, r.pdf_mtime));
+        if (this.detached) this.pdfMtime = r.pdf_mtime;
+        else if (await this.pdf.load(api.pdfUrl(this.pid, r.pdf_mtime))) this.pdfMtime = r.pdf_mtime;
+        else if (!this.pdf.numPages) this.pdf.showEmpty(r.pdf_partial ? t('Compilation stopped at an error before the PDF was finished. Fix the error shown in the log and compile again.') : t('Could not open the PDF.'));
+        else toast(t('Could not refresh the PDF; showing the previous version.'), 'error');
       }
       if (r.errors.length && !this.sizes.logOpen) this.setLogOpen(true);
       if (r.missing?.length) toast(t('Missing packages: {list} — open 📦 Packages', { list: r.missing.map((m) => m.file).join(', ') }), 'error', 6000);

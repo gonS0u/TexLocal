@@ -18,6 +18,99 @@ router = APIRouter(prefix="/api/projects/{pid}", tags=["compile"])
 
 _locks: dict[str, asyncio.Lock] = {}
 
+# The viewer is served a stable copy of the last *good* PDF (plus its SyncTeX file),
+# published atomically after each compilation. The raw output in .build/ is rewritten
+# in place by TeX, truncated at the start of every run and deleted by some fatal errors,
+# so serving it directly makes the preview vanish or show garbage.
+VIEW_DIR = ".view"
+
+
+def _pdf_state(p: Path) -> str | None:
+    """'complete' (has the %%EOF trailer), 'partial' (a PDF that TeX stopped writing,
+    e.g. LuaLaTeX after a fatal error; pdf.js can still show the finished pages) or None."""
+    try:
+        size = p.stat().st_size
+        if size < 64:
+            return None
+        with p.open("rb") as f:
+            if f.read(5) != b"%PDF-":
+                return None
+            f.seek(max(0, size - 2048))
+            return "complete" if b"%%EOF" in f.read() else "partial"
+    except OSError:
+        return None
+
+
+def _publish(build: Path, stem: str) -> str | None:
+    """Copy build/<stem>.pdf (+ .synctex.gz) to build/.view/ atomically.
+
+    A complete PDF is always published. A partial one only when nothing complete has been
+    published yet, so a good preview is never replaced by a truncated one.
+    Returns the state published ('complete' / 'partial') or None if nothing was published.
+    """
+    pdf = build / f"{stem}.pdf"
+    state = _pdf_state(pdf)
+    if state is None:
+        return None
+    view = build / VIEW_DIR
+    marker = view / f"{stem}.partial"
+    if state == "partial" and (view / f"{stem}.pdf").exists() and not marker.exists():
+        return None
+    view.mkdir(exist_ok=True)
+    for name in (f"{stem}.synctex.gz", f"{stem}.pdf"):  # PDF last: its mtime marks a complete publish
+        src, dst = build / name, view / name
+        if src.exists():
+            tmp = view / f".{name}.tmp"
+            shutil.copyfile(src, tmp)
+            os.replace(tmp, dst)
+        elif dst.exists():
+            dst.unlink()
+    if state == "partial":
+        marker.touch()
+    elif marker.exists():
+        marker.unlink()
+    return state
+
+
+def _aux_file(base: Path, stem: str, ext: str) -> Path | None:
+    """Newest <stem>.<ext> in .build/ or in a first-level folder of the project.
+
+    A project's own .latexmkrc may set $aux_dir (e.g. '.aux'), in which case the log and
+    the .blg are written there instead of in the output directory.
+    """
+    name = f"{stem}.{ext}"
+    cands = [base / BUILD_DIR_NAME / name, base / name, *base.glob(f"*/{name}")]
+    found = [p for p in cands if p.is_file() and VIEW_DIR not in p.parts]
+    return max(found, key=lambda p: p.stat().st_mtime, default=None)
+
+
+def _latexmk_summary(output: str, base: Path) -> list[dict]:
+    """latexmk's "Collected error summary" (e.g. biber failing), used when the log has no errors."""
+    errs, on = [], False
+    for line in output.splitlines():
+        if line.startswith("Collected error summary"):
+            on = True
+            continue
+        if on:
+            if not line.startswith("  "):
+                break
+            errs.append({"file": None, "line": None, "message": "latexmk: " + line.strip()})
+    if any("biber" in e["message"] for e in errs) and not shutil.which("biber"):
+        errs.insert(0, {"file": None, "line": None, "message": "biber is not installed (sudo apt install biber): the bibliography cannot be built."})
+    return errs
+
+
+def view_pdf(pid: str) -> Path | None:
+    """The PDF shown to the user: the last good one, published from .build/ if needed."""
+    build = project_dir(pid) / BUILD_DIR_NAME
+    stem = _main_stem(pid)
+    pdf = build / VIEW_DIR / f"{stem}.pdf"
+    if pdf.exists():
+        return pdf
+    if _publish(build, stem):  # projects compiled before the view copy existed
+        return pdf
+    return None
+
 
 class CompileReq(BaseModel):
     engine: str | None = None
@@ -114,16 +207,22 @@ async def compile_project(pid: str, req: CompileReq):
         build = base / BUILD_DIR_NAME
         if req.clean and build.exists():
             shutil.rmtree(build)
+        stem = Path(main).with_suffix("").name
+        raw = build / f"{stem}.pdf"
+        before = raw.stat().st_mtime_ns if raw.exists() else None
         t0 = time.monotonic()
         rc, output = await _compile(base, main, engine)
         dt = time.monotonic() - t0
-    stem = Path(main).with_suffix("").name
-    log_file = build / f"{stem}.log"
-    log_text = log_file.read_text(errors="replace") if log_file.exists() else output
+        produced = raw.exists() and raw.stat().st_mtime_ns != before
+        updated = bool(produced and _publish(build, stem))
+    log_file = _aux_file(base, stem, "log")
+    log_text = log_file.read_text(errors="replace") if log_file else output
     parsed = parse_log(log_text)
-    blg = build / f"{stem}.blg"
-    if blg.exists():
+    blg = _aux_file(base, stem, "blg")
+    if blg:
         parsed["errors"] += parse_blg(blg.read_text(errors="replace"))
+    if rc != 0 and not parsed["errors"]:
+        parsed["errors"] += _latexmk_summary(output, base)
     for item in parsed["errors"] + parsed["warnings"]:
         f = item.get("file")
         if f:
@@ -133,11 +232,13 @@ async def compile_project(pid: str, req: CompileReq):
                 item["external"] = False
             except ValueError:
                 item["external"] = True
-    pdf = build / f"{stem}.pdf"
+    pdf = build / VIEW_DIR / f"{stem}.pdf"
     return {
         "ok": rc == 0 and not parsed["errors"],
         "pdf": pdf.exists(),
         "pdf_mtime": pdf.stat().st_mtime if pdf.exists() else None,
+        "pdf_updated": updated,  # False: errors stopped TeX, the previous PDF is still shown
+        "pdf_partial": pdf.with_suffix(".partial").exists(),  # only the pages before a fatal error
         "duration": round(dt, 2),
         "engine": engine,
         "main": main,
@@ -152,18 +253,16 @@ def _main_stem(pid: str) -> str:
 
 @router.get("/pdf")
 def get_pdf(pid: str):
-    base = project_dir(pid)
-    pdf = base / BUILD_DIR_NAME / f"{_main_stem(pid)}.pdf"
-    if not pdf.exists():
+    pdf = view_pdf(pid)
+    if not pdf:
         raise HTTPException(404, "PDF not compiled yet")
     return FileResponse(pdf, media_type="application/pdf", headers={"Cache-Control": "no-store"})
 
 
 @router.get("/pdf/download")
 def download_pdf(pid: str):
-    base = project_dir(pid)
-    pdf = base / BUILD_DIR_NAME / f"{_main_stem(pid)}.pdf"
-    if not pdf.exists():
+    pdf = view_pdf(pid)
+    if not pdf:
         raise HTTPException(404, "PDF not compiled yet")
     return FileResponse(pdf, media_type="application/pdf", filename=f"{pid}.pdf")
 
@@ -171,5 +270,5 @@ def download_pdf(pid: str):
 @router.get("/log", response_class=PlainTextResponse)
 def get_log(pid: str):
     base = project_dir(pid)
-    log = base / BUILD_DIR_NAME / f"{_main_stem(pid)}.log"
-    return log.read_text(errors="replace") if log.exists() else ""
+    log = _aux_file(base, _main_stem(pid), "log")
+    return log.read_text(errors="replace") if log else ""

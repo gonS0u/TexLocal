@@ -5,6 +5,24 @@ import { t } from './i18n.js';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 
+/**
+ * Download a PDF. If it has no %%EOF trailer it may still be being written: retry once,
+ * then accept it anyway (TeX can leave a truncated PDF after a fatal error; pdf.js still
+ * shows the pages that were finished).
+ */
+async function fetchPdf(url) {
+  for (let attempt = 0; ; attempt++) {
+    const r = await fetch(url, { cache: 'no-store' });
+    if (!r.ok) { const e = new Error(`HTTP ${r.status}`); e.status = r.status; throw e; }
+    const data = new Uint8Array(await r.arrayBuffer());
+    const head = String.fromCharCode(...data.subarray(0, 5));
+    const tail = String.fromCharCode(...data.subarray(Math.max(0, data.length - 2048)));
+    if (head !== '%PDF-') throw new Error('Not a PDF');
+    if (tail.includes('%%EOF') || attempt >= 1) return data;
+    await new Promise((res) => setTimeout(res, 500));
+  }
+}
+
 /** PDF points (1/72 in) → CSS pixels (1/96 in): 100% zoom = real paper size. */
 const CSS_UNITS = 96 / 72;
 
@@ -50,24 +68,44 @@ export class PdfViewer {
     this._rl = setTimeout(() => this.layout(true), 150);
   }
 
+  /**
+   * Load a PDF. The whole file is downloaded first and handed to pdf.js as data, so the
+   * open document never reads the file again (it is rewritten by the next compilation).
+   * Only the most recent call wins. On failure the PDF already shown is kept.
+   * Resolves to false only when loading failed (a call superseded by a newer one is not a failure).
+   */
   async load(url) {
-    const anchor = this.currentAnchor();
-    const task = pdfjsLib.getDocument({ url, isEvalSupported: false });
-    let pdf;
-    try { pdf = await task.promise; } catch (e) { this.showEmpty(t('Could not open the PDF.')); return; }
-    const old = this.task;
-    this.task = task;
-    this.pdf = pdf;
-    if (old) old.destroy().catch(() => {});
-    this.sizes = [];
-    for (let i = 1; i <= pdf.numPages; i++) {
-      const p = await pdf.getPage(i);
-      const vp = p.getViewport({ scale: 1 });
-      this.sizes.push({ w: vp.width, h: vp.height });
+    const seq = (this.loadSeq = (this.loadSeq || 0) + 1);
+    const stale = () => seq !== this.loadSeq;
+    let task;
+    try {
+      const data = await fetchPdf(url);
+      if (stale()) return true;
+      task = pdfjsLib.getDocument({ data, isEvalSupported: false });
+      const pdf = await task.promise;
+      const sizes = [];
+      for (let i = 1; i <= pdf.numPages; i++) {
+        const vp = (await pdf.getPage(i)).getViewport({ scale: 1 });
+        sizes.push({ w: vp.width, h: vp.height });
+      }
+      if (stale()) { task.destroy().catch(() => {}); return true; }
+      const anchor = this.currentAnchor();
+      const old = this.task;
+      this.task = task;
+      this.pdf = pdf;
+      this.sizes = sizes;
+      await this.layout(false);
+      if (anchor) this.restoreAnchor(anchor);
+      this.notifyPage(true);
+      if (old) old.destroy().catch(() => {});
+      return true;
+    } catch (e) {
+      task?.destroy().catch(() => {});
+      if (stale()) return true;
+      console.warn('PDF load failed:', e);
+      if (!this.pages.length) this.showEmpty(e.status === 404 ? t('No PDF yet. Compile the project (Ctrl+S).') : t('Could not open the PDF.'));
+      return false;
     }
-    await this.layout(false);
-    if (anchor) this.restoreAnchor(anchor);
-    this.notifyPage(true);
   }
 
   showEmpty(msg) {
@@ -110,16 +148,23 @@ export class PdfViewer {
     pg.rendered = true;
     const token = this.renderToken;
     const px = this.px;
-    const page = await this.pdf.getPage(n);
-    if (token !== this.renderToken) return;
-    const dpr = window.devicePixelRatio || 1;
-    const viewport = page.getViewport({ scale: px * dpr });
-    const canvas = el('canvas', { width: Math.floor(viewport.width), height: Math.floor(viewport.height) });
-    canvas.style.width = `${pg.w * px}px`;
-    canvas.style.height = `${pg.h * px}px`;
+    const canvas = el('canvas');
     try {
+      const page = await this.pdf.getPage(n);
+      if (token !== this.renderToken) return;
+      const dpr = window.devicePixelRatio || 1;
+      const viewport = page.getViewport({ scale: px * dpr });
+      canvas.width = Math.floor(viewport.width);
+      canvas.height = Math.floor(viewport.height);
+      canvas.style.width = `${pg.w * px}px`;
+      canvas.style.height = `${pg.h * px}px`;
       await page.render({ canvas, viewport }).promise;
-    } catch (e) { console.error("PDF render", e); pg.rendered = false; return; }
+    } catch (e) {
+      // Leave the page renderable again (it is retried when it next scrolls into view).
+      pg.rendered = false;
+      if (e?.name !== 'RenderingCancelledException' && token === this.renderToken) console.warn('PDF render failed:', e);
+      return;
+    }
     if (token !== this.renderToken) return;
     pg.wrap.querySelector('canvas')?.remove();
     pg.wrap.prepend(canvas);

@@ -154,6 +154,7 @@ Build output (`.build/`) and the `project.json` settings file are left out. The 
 - The toolbar above the PDF holds the zoom controls: zoom out, the current zoom level (click it to return to 100%), zoom in, fit to width, and 1:1 (actual size).
 - The page box shows the visible page and the total number of pages. Type a number and press Enter to jump to that page.
 - Zoom level and scroll position are kept when you recompile.
+- If a compilation fails before TeX can finish the PDF, the last successfully compiled PDF stays on screen (hover the error count in the top bar to see this noted). Its SyncTeX data is kept with it, so jumping between source and PDF keeps working.
 - **Source to PDF:** press Ctrl+Enter, or use the arrow button, to highlight the text under the cursor in the PDF.
 - **PDF to source:** double-click anywhere in the PDF to open the corresponding line in the editor.
 
@@ -223,7 +224,7 @@ On macOS, use Cmd instead of Ctrl.
 |---|---|
 | `projects/<id>/` | Your project files, exactly as you see them in the file tree |
 | `projects/<id>/project.json` | Project settings: name, main file, engine, spell-checking language |
-| `projects/<id>/.build/` | Compilation output: PDF, log, SyncTeX and auxiliary files |
+| `projects/<id>/.build/` | Compilation output: PDF, log, SyncTeX and auxiliary files. `.build/.view/` holds the last good PDF, which is the one the preview shows |
 | `~/.local/share/latexlocal/dictionaries/` | Downloaded spell-checking dictionaries |
 | `~/.local/share/latexlocal/personal-<lang>.txt` | Your personal word list for each language |
 | `~/texmf/` | Packages installed in user mode with `tlmgr` |

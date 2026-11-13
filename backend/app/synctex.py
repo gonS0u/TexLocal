@@ -4,8 +4,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 
-from .compiler import _main_stem
-from .config import BUILD_DIR_NAME
+from .compiler import view_pdf
 from .paths import project_dir, safe_path
 
 router = APIRouter(prefix="/api/projects/{pid}/synctex", tags=["synctex"])
@@ -44,8 +43,8 @@ async def view(pid: str, file: str, line: int, column: int = 0):
     """Source position -> PDF position (PDF points, origin top-left)."""
     base = project_dir(pid)
     src = safe_path(base, file)
-    pdf = base / BUILD_DIR_NAME / f"{_main_stem(pid)}.pdf"
-    if not pdf.exists():
+    pdf = view_pdf(pid)
+    if not pdf:
         raise HTTPException(404, "No PDF")
     # Try a few path spellings: synctex matches the name recorded by TeX.
     rel = src.relative_to(base).as_posix()
@@ -69,8 +68,8 @@ async def view(pid: str, file: str, line: int, column: int = 0):
 async def edit(pid: str, page: int, x: float, y: float):
     """PDF position (points, origin top-left) -> source file/line."""
     base = project_dir(pid)
-    pdf = base / BUILD_DIR_NAME / f"{_main_stem(pid)}.pdf"
-    if not pdf.exists():
+    pdf = view_pdf(pid)
+    if not pdf:
         raise HTTPException(404, "No PDF")
     out = await _synctex(["edit", "-o", f"{page}:{x:.2f}:{y:.2f}:{pdf}", "-d", str(pdf.parent)], base)
     for r in _records(out):
