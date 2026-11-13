@@ -37,6 +37,8 @@ export const api = {
   project: (id) => req('GET', P(id)),
   updateProject: (id, data) => req('PATCH', P(id), data),
   deleteProject: (id) => req('DELETE', P(id)),
+  copyProject: (id, name) => req('POST', `${P(id)}/copy`, { name }),
+  exportUrl: (id) => `${P(id)}/export`,
 
   tree: (id) => req('GET', `${P(id)}/tree`),
   readFile: (id, path) => req('GET', `${P(id)}/file?${q({ path })}`),

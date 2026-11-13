@@ -25,7 +25,17 @@ Os projetos ficam em `projects/<id>/`, como pastas normais; os ficheiros gerados
 | Ctrl+/ | Comentar linha |
 | Ctrl+F | Procurar/substituir |
 
+Botão ⧉ na barra do PDF: abre o PDF numa janela separada (por exemplo, num segundo monitor). Essa janela atualiza a cada compilação e mantém o SyncTeX com o editor. Para voltar, fecha-a ou usa "Reintegrar o PDF".
+
 Clique direito na árvore de ficheiros: definir ficheiro principal, mudar nome, apagar. Arrastar ficheiros para a árvore: carregar.
+
+## Copiar e exportar projetos
+
+Dentro de um projeto, o menu **Projeto ▾** na barra de topo tem duas opções:
+- **Fazer uma cópia…**: cria um projeto novo e independente, com os mesmos ficheiros e definições, e abre-o.
+- **Descarregar como ZIP**: descarrega todos os ficheiros-fonte.
+
+Antes de qualquer das duas, as alterações por gravar são gravadas. A pasta `.build/` fica de fora. Na lista de projetos, os botões **Copiar** e **ZIP** de cada cartão fazem o mesmo.
 
 ## Importar projetos
 

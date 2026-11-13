@@ -40,10 +40,12 @@ Portuguese version: [README.pt-PT.md](README.pt-PT.md)
 - Opens at 100% (real paper size), with zoom in and out, fit-to-width and a one-click return to 100%.
 - Shows the current page and the total page count; type a page number to jump to it.
 - Two-way SyncTeX: jump from the cursor to the PDF, or double-click the PDF to jump to the source.
+- Can be opened in a separate window (for example on a second monitor) that stays in sync with the editor.
 
 **Projects**
 - Templates (article, thesis, blank) in English or Portuguese.
 - Import from a ZIP file (for example an Overleaf export), from a folder chosen in the browser, or from a folder on disk.
+- Duplicate a project, or export the whole project as a ZIP file.
 - Projects are ordinary folders, so they work with Git, backups and other editors.
 
 **Package manager**
@@ -128,6 +130,17 @@ Imports are limited to 500 MB and 20,000 files.
 
 Inside an open project you can also add files by dragging them onto the file tree, or upload a whole folder with the upload-folder button in the file tree toolbar. Subfolders are preserved.
 
+### Copying and exporting a project
+
+Open the **Project** menu in the top bar of a project. It has two entries:
+
+- **Make a copy...** asks for a name (suggested: the current name followed by "(copy)") and creates a new, independent project with the same files and settings: main file, engine and spell-check language. It then opens the copy. Use this to keep a snapshot before making large changes.
+- **Download as ZIP** downloads every source file of the project as `<project-id>.zip`.
+
+Both actions save any unsaved changes in the editor first, so the copy and the ZIP always match what you see. The project list has the same actions as **Copy** and **ZIP** buttons on each project card.
+
+Build output (`.build/`) and the `project.json` settings file are left out. The copy is recompiled when you open it. The ZIP holds a single top-level folder, so it can be imported again here, or uploaded to Overleaf, without changes.
+
 ### Editing and compiling
 
 - **Compile** (or Ctrl+S) saves all open files and compiles the project.
@@ -143,6 +156,18 @@ Inside an open project you can also add files by dragging them onto the file tre
 - Zoom level and scroll position are kept when you recompile.
 - **Source to PDF:** press Ctrl+Enter, or use the arrow button, to highlight the text under the cursor in the PDF.
 - **PDF to source:** double-click anywhere in the PDF to open the corresponding line in the editor.
+
+#### PDF in a separate window
+
+Click the "Open PDF in a new window" button at the right of the PDF toolbar to move the preview into its own browser window, which you can place on another monitor. While it is open:
+
+- The PDF pane in the main window is collapsed, so the editor takes the full width. A narrow strip on the right edge has a "Reattach PDF" button.
+- Every compilation reloads the PDF in the separate window, keeping its zoom level and page.
+- SyncTeX works across both windows: Ctrl+Enter in the editor highlights the position in the separate window, and double-clicking there jumps to the line in the editor.
+- Ctrl+S in the PDF window saves and compiles, just as it does in the editor.
+- Closing the window, or clicking "Reattach PDF" in either window, brings the PDF back into the main window.
+
+If nothing happens when you click the button, your browser is blocking pop-ups: allow them for `127.0.0.1`.
 
 ### Spell checking
 
@@ -270,6 +295,7 @@ LaTeX Local is designed for a single user on their own computer.
 │       ├── completion.js   LaTeX autocompletion
 │       ├── spellcheck.js   LaTeX-aware spell-check extension
 │       ├── pdfviewer.js    PDF.js viewer with zoom, page tracking and SyncTeX
+│       ├── pdfpane.js      PDF toolbar, shared by the main and the separate PDF window
 │       ├── filetree.js     File tree, drag-and-drop and uploads
 │       ├── logpanel.js     Compilation log panel
 │       ├── packages.js     Package and dictionary manager
@@ -287,6 +313,7 @@ Run the backend tests:
 
 ```bash
 cd backend
+../.venv/bin/pip install -r requirements-dev.txt   # once: installs pytest
 ../.venv/bin/python -m pytest -q
 ```
 

@@ -2,7 +2,7 @@ import './style.css';
 import { api, el, toast, store, droppedFiles } from './api.js';
 import { t, getLang, setLang, fmtDate } from './i18n.js';
 import { Editor } from './editor.js';
-import { PdfViewer } from './pdfviewer.js';
+import { buildPdfPane, pdfChannel } from './pdfpane.js';
 import { FileTree } from './filetree.js';
 import { LogPanel } from './logpanel.js';
 import { PackageManager } from './packages.js';
@@ -26,8 +26,10 @@ let current = null;
 
 function route() {
   const m = location.hash.match(/^#\/p\/([^/]+)/);
+  const d = location.hash.match(/^#\/pdf\/([^/]+)/);
   if (current) { current.destroy(); current = null; }
-  if (m) current = new ProjectView(decodeURIComponent(m[1]));
+  if (d) current = new DetachedPdfView(decodeURIComponent(d[1]));
+  else if (m) current = new ProjectView(decodeURIComponent(m[1]));
   else showProjects();
 }
 window.addEventListener('hashchange', route);
@@ -48,6 +50,35 @@ const themeBtn = () => el('button', { class: 'btn ghost', title: t('Light/dark t
 
 function openProject(p) {
   location.hash = `#/p/${encodeURIComponent(p.id)}`;
+}
+
+// ------------------------------------------------------------------ copy / export
+/** Ask for a name and duplicate the project; resolves to the new project's metadata (or null). */
+async function copyProject(p) {
+  const name = prompt(t('Name of the copy:'), `${p.name} ${t('(copy)')}`);
+  if (!name || !name.trim()) return null;
+  try {
+    const m = await api.copyProject(p.id, name.trim());
+    toast(t('Copy created: {name}', { name: m.name }), 'success');
+    return m;
+  } catch (e) { toast(e.message, 'error'); return null; }
+}
+
+function downloadZip(pid) {
+  const a = el('a', { href: api.exportUrl(pid), download: `${pid}.zip` });
+  document.body.append(a);
+  a.click();
+  a.remove();
+}
+
+/** Small drop-down menu anchored under `btn`; closes on any outside click. */
+function dropdown(btn, items) {
+  document.querySelector('.dropdown-menu')?.remove();
+  const r = btn.getBoundingClientRect();
+  const m = el('div', { class: 'context-menu dropdown-menu', style: { top: `${r.bottom + 4}px`, right: `${Math.max(8, window.innerWidth - r.right)}px` } },
+    ...items.map(([label, fn]) => el('div', { class: 'menu-item', onclick: () => { m.remove(); fn(); } }, label)));
+  document.body.append(m);
+  setTimeout(() => document.addEventListener('click', () => m.remove(), { once: true }));
 }
 
 // ------------------------------------------------------------------ import
@@ -144,6 +175,8 @@ async function showProjects() {
         el('div', { class: 'pc-meta' }, t('Modified {date}', { date: fmtDate(p.modified * 1000) })),
         el('div', { class: 'pc-actions' },
           el('button', { class: 'btn small', onclick: async (e) => { e.stopPropagation(); const n = prompt(t('New name:'), p.name); if (n) { await api.updateProject(p.id, { name: n }); showProjects(); } } }, t('Rename')),
+          el('button', { class: 'btn small', title: t('Make a copy…'), onclick: async (e) => { e.stopPropagation(); if (await copyProject(p)) showProjects(); } }, t('Copy')),
+          el('button', { class: 'btn small', title: t('Download as ZIP'), onclick: (e) => { e.stopPropagation(); downloadZip(p.id); } }, 'ZIP'),
           el('button', { class: 'btn danger small', onclick: async (e) => { e.stopPropagation(); if (confirm(t('Delete the project “{name}” and all its files?', { name: p.name }))) { await api.deleteProject(p.id); showProjects(); } } }, t('Delete')))));
     }
   } catch (e) { list.innerHTML = ''; list.append(el('div', { class: 'notice error' }, e.message)); }
@@ -172,6 +205,47 @@ class ProjectView {
     window.removeEventListener('keydown', this.keyHandler);
     window.removeEventListener('beforeunload', this.beforeUnload);
     this.pdf?.observer.disconnect();
+    clearInterval(this.detachPoll);
+    this.chan?.close();
+  }
+
+  // ---------------------------------------------------- detached PDF window
+  setupPdfChannel() {
+    this.chan = pdfChannel(this.pid);
+    this.chan.onmessage = ({ data: m }) => {
+      if (m.type === 'hello') this.setDetached(true);
+      else if (m.type === 'bye') this.setDetached(false);
+      else if (m.type === 'edit') { window.focus(); this.syncToSource(m.page, m.x, m.y); }
+      else if (m.type === 'compile') this.saveAndCompile();
+    };
+    // A PDF window may already be open (e.g. this page was reloaded).
+    this.chan.postMessage({ type: 'ping' });
+  }
+
+  detachPdf() {
+    const url = `${location.pathname}#/pdf/${encodeURIComponent(this.pid)}`;
+    const w = window.open(url, `latexlocal-pdf-${this.pid}`, 'popup,width=900,height=1000');
+    if (!w) { toast(t('Pop-up blocked — allow pop-ups for this page'), 'error', 6000); return; }
+    this.detachedWin = w;
+    this.setDetached(true);
+    clearInterval(this.detachPoll);
+    this.detachPoll = setInterval(() => {
+      if (this.detachedWin?.closed) { clearInterval(this.detachPoll); this.detachedWin = null; this.setDetached(false); }
+    }, 1000);
+  }
+
+  reattachPdf() {
+    this.chan.postMessage({ type: 'close' });
+    this.detachedWin?.close();
+    this.setDetached(false);
+  }
+
+  setDetached(on) {
+    if (this.detached === on) return;
+    this.detached = on;
+    this.workspace.classList.toggle('pdf-detached', on);
+    // Coming back: the inline viewer missed the compilations made meanwhile.
+    if (!on && this.lastResult?.pdf) this.pdf.load(api.pdfUrl(this.pid, this.lastResult.pdf_mtime));
   }
 
   async init() {
@@ -218,6 +292,7 @@ class ProjectView {
       this.statusEl,
       el('button', { class: 'btn ghost', onclick: () => pm.open('missing', this.lastResult?.missing || []) }, '📦 ' + t('Packages')),
       el('a', { class: 'btn ghost', href: api.pdfDownloadUrl(this.pid), title: t('Download PDF') }, '⬇ PDF'),
+      el('button', { class: 'btn ghost project-menu-btn', onclick: (e) => { e.stopPropagation(); this.projectMenu(e.currentTarget); } }, t('Project') + ' ▾'),
       langSwitch(),
       themeBtn(),
     );
@@ -227,35 +302,21 @@ class ProjectView {
     const editorHost = el('div', { class: 'editor-host' });
     this.imgPreview = el('div', { class: 'img-preview hidden' });
     const editorPane = el('section', { class: 'pane editor-pane' }, this.tabBar, editorHost, this.imgPreview);
-    const pdfToolbar = el('div', { class: 'pdf-toolbar' },
-      el('button', { class: 'icon-btn', title: t('Go to the cursor position in the PDF (Ctrl+Enter)'), onclick: () => this.syncToPdfFromCursor() }, '→'),
-      el('button', { class: 'icon-btn', title: t('Zoom out'), onclick: () => this.pdf.zoom(1 / 1.15) }, '−'),
-      this.zoomLabel = el('span', { class: 'zoom', title: t('Actual size (100%)'), onclick: () => this.pdf.actualSize() }, '100%'),
-      el('button', { class: 'icon-btn', title: t('Zoom in'), onclick: () => this.pdf.zoom(1.15) }, '+'),
-      el('button', { class: 'icon-btn', title: t('Fit width'), onclick: () => this.pdf.fitWidth() }, '↔'),
-      el('button', { class: 'icon-btn small-txt', title: t('Actual size (100%)'), onclick: () => this.pdf.actualSize() }, '1:1'),
-      el('span', { class: 'page-ind', title: t('Page') },
-        this.pageInput = el('input', {
-          class: 'page-input', type: 'text', inputmode: 'numeric', value: '–', disabled: true, 'aria-label': t('Page'),
-          onkeydown: (e) => {
-            if (e.key === 'Enter') { this.pdf.goToPage(Number(this.pageInput.value)); this.pageInput.blur(); }
-            else if (e.key === 'Escape') { this.pageInput.blur(); }
-          },
-          onfocus: () => this.pageInput.select(),
-          onblur: () => this.pdf.notifyPage(true),
-          onchange: () => this.pdf.goToPage(Number(this.pageInput.value)),
-        }),
-        this.pageTotal = el('span', { class: 'page-total' }, '/ –')),
-      el('div', { class: 'spacer' }),
-      el('span', { class: 'muted small' }, t('Double-click → source')));
-    const pdfHost = el('div', { class: 'pdf-host' });
-    const pdfPane = el('section', { class: 'pane pdf-pane' }, pdfToolbar, pdfHost);
+    const { pane: pdfPane, viewer } = buildPdfPane({
+      onSyncToSource: (page, x, y) => this.syncToSource(page, x, y),
+      leftButtons: [el('button', { class: 'icon-btn', title: t('Go to the cursor position in the PDF (Ctrl+Enter)'), onclick: () => this.syncToPdfFromCursor() }, '→')],
+      rightButtons: [el('button', { class: 'icon-btn', title: t('Open PDF in a new window'), onclick: () => this.detachPdf() }, '⧉')],
+    });
+    this.pdf = viewer;
+    this.detachedNote = el('div', { class: 'pdf-detached-note' },
+      el('span', {}, t('The PDF is open in a separate window')),
+      el('button', { class: 'btn ghost', onclick: () => this.reattachPdf() }, t('Reattach PDF')));
     this.logHost = el('div', { class: 'log-pane' });
     this.logToggle = el('button', { class: 'log-toggle', onclick: () => this.toggleLog() }, '▴ ' + t('Log'));
 
     const g1 = el('div', { class: 'gutter', 'data-for': 'tree' });
     const g2 = el('div', { class: 'gutter', 'data-for': 'editor' });
-    this.workspace = el('div', { class: 'workspace' }, treePane, g1, editorPane, g2, pdfPane);
+    this.workspace = el('div', { class: 'workspace' }, treePane, g1, editorPane, g2, pdfPane, this.detachedNote);
     const gLog = el('div', { class: 'gutter-h' });
     this.mainArea = el('div', { class: 'main-area' }, this.workspace, gLog, this.logHost);
     app.append(top, this.mainArea, this.logToggle);
@@ -305,20 +366,27 @@ class ProjectView {
     });
     this.editor.setWrap(store.get('wrap', true));
 
-    this.pdf = new PdfViewer(pdfHost, { onSyncToSource: (page, x, y) => this.syncToSource(page, x, y) });
-    this.pdf.onScale = (s) => { this.zoomLabel.textContent = `${Math.round(s * 100)}%`; };
-    this.pdf.onPageChange = (page, total) => {
-      if (document.activeElement !== this.pageInput) this.pageInput.value = total ? String(page) : '–';
-      this.pageInput.disabled = !total;
-      this.pageInput.max = String(total || 1);
-      this.pageTotal.textContent = `/ ${total || '–'}`;
-    };
+    this.setupPdfChannel();
 
     this.log = new LogPanel(this.logHost, {
       onJump: (file, line) => this.openFile(file, { line }),
       onInstallMissing: (missing) => pm.open('missing', missing),
     });
     this.log.onRaw = () => api.log(this.pid);
+  }
+
+  projectMenu(btn) {
+    dropdown(btn, [
+      [t('Make a copy…'), async () => {
+        try { await this.saveAll(); } catch (e) { toast(t('Error saving: {msg}', { msg: e.message }), 'error'); return; }
+        const m = await copyProject(this.meta);
+        if (m) openProject(m);
+      }],
+      [t('Download as ZIP'), async () => {
+        try { await this.saveAll(); } catch (e) { toast(t('Error saving: {msg}', { msg: e.message }), 'error'); return; }
+        downloadZip(this.pid);
+      }],
+    ]);
   }
 
   dragGutter(g, onMove, getStart) {
@@ -435,7 +503,10 @@ class ProjectView {
         ...r.errors.filter((e) => !e.external).map((e) => ({ ...e, file: e.file || r.main, severity: 'error' })),
         ...r.warnings.filter((w) => w.file && !w.external).map((w) => ({ ...w, severity: 'warning' })),
       ]);
-      if (r.pdf) await this.pdf.load(api.pdfUrl(this.pid, r.pdf_mtime));
+      if (r.pdf) {
+        this.chan.postMessage({ type: 'pdf', mtime: r.pdf_mtime });
+        if (!this.detached) await this.pdf.load(api.pdfUrl(this.pid, r.pdf_mtime));
+      }
       if (r.errors.length && !this.sizes.logOpen) this.setLogOpen(true);
       if (r.missing?.length) toast(t('Missing packages: {list} — open 📦 Packages', { list: r.missing.map((m) => m.file).join(', ') }), 'error', 6000);
     } catch (e) {
@@ -497,7 +568,8 @@ class ProjectView {
     if (!file) return;
     try {
       const pos = await api.syncView(this.pid, file, line, col);
-      this.pdf.showPosition(pos);
+      if (this.detached) this.chan.postMessage({ type: 'show', pos });
+      else this.pdf.showPosition(pos);
     } catch (e) { toast('SyncTeX: ' + e.message, 'error'); }
   }
 
@@ -506,6 +578,51 @@ class ProjectView {
       const r = await api.syncEdit(this.pid, page, x, y);
       await this.openFile(r.file, { line: r.line });
     } catch (e) { toast('SyncTeX: ' + e.message, 'error'); }
+  }
+}
+
+/** Stand-alone PDF window (#/pdf/<id>), kept in sync with the project window. */
+class DetachedPdfView {
+  constructor(pid) {
+    this.pid = pid;
+    this.chan = pdfChannel(pid);
+    this.keyHandler = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); this.chan.postMessage({ type: 'compile' }); }
+    };
+    window.addEventListener('keydown', this.keyHandler);
+    this.bye = () => this.chan.postMessage({ type: 'bye' });
+    window.addEventListener('pagehide', this.bye);
+    this.init();
+  }
+
+  async init() {
+    let meta = { name: this.pid };
+    try { meta = await api.project(this.pid); } catch { /* still show the PDF */ }
+    document.title = `${meta.name} — PDF`;
+    app.innerHTML = '';
+    const { pane, viewer } = buildPdfPane({
+      onSyncToSource: (page, x, y) => this.chan.postMessage({ type: 'edit', page, x, y }),
+      leftButtons: [el('span', { class: 'brand' }, el('span', { class: 'logo' }, 'TeX'))],
+      rightButtons: [el('button', { class: 'btn ghost', title: t('Reattach PDF'), onclick: () => window.close() }, t('Reattach PDF'))],
+    });
+    this.pdf = viewer;
+    app.append(el('div', { class: 'detached-pdf' }, pane));
+    this.chan.onmessage = ({ data: m }) => {
+      if (m.type === 'pdf') this.pdf.load(api.pdfUrl(this.pid, m.mtime));
+      else if (m.type === 'show') { window.focus(); this.pdf.showPosition(m.pos); }
+      else if (m.type === 'ping') this.chan.postMessage({ type: 'hello' });
+      else if (m.type === 'close') window.close();
+    };
+    this.chan.postMessage({ type: 'hello' });
+    try { await this.pdf.load(api.pdfUrl(this.pid)); } catch { /* no pdf yet */ }
+  }
+
+  destroy() {
+    window.removeEventListener('keydown', this.keyHandler);
+    window.removeEventListener('pagehide', this.bye);
+    this.bye();
+    this.pdf?.observer.disconnect();
+    this.chan.close();
   }
 }
 

@@ -1,11 +1,16 @@
 import json
+import os
 import re
 import shutil
+import tempfile
 import time
 import unicodedata
+import zipfile
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
+from starlette.background import BackgroundTask
 
 from .config import BUILD_DIR_NAME, ENGINES, PROJECTS_DIR
 from .paths import project_dir
@@ -114,6 +119,10 @@ class ProjectCreate(BaseModel):
     lang: str = "en"
 
 
+class ProjectCopy(BaseModel):
+    name: str | None = None
+
+
 class ProjectUpdate(BaseModel):
     name: str | None = None
     main: str | None = None
@@ -219,3 +228,44 @@ def update_project(pid: str, body: ProjectUpdate):
 def delete_project(pid: str):
     shutil.rmtree(project_dir(pid))
     return {"ok": True}
+
+
+@router.post("/{pid}/copy")
+def copy_project(pid: str, body: ProjectCopy | None = None):
+    """Duplicate a project's sources (not its build output) under a new id."""
+    src = project_dir(pid)
+    meta = read_meta(pid)
+    name = ((body.name if body else None) or "").strip()[:120] or f"{meta['name']} (copy)"
+    new_id = new_project_id(name)
+    dst = project_dir(new_id, must_exist=False)
+    shutil.copytree(src, dst, symlinks=True, ignore=shutil.ignore_patterns(BUILD_DIR_NAME))
+    write_meta(new_id, {**meta, "name": name, "created": time.time()})
+    return read_meta(new_id)
+
+
+def _export_files(d):
+    """Project sources to export: no build output, no metadata, no symlinks."""
+    for p in sorted(d.rglob("*")):
+        rel = p.relative_to(d)
+        if BUILD_DIR_NAME in rel.parts or rel.as_posix() == META:
+            continue
+        if p.is_symlink() or not p.is_file():
+            continue
+        yield p, rel.as_posix()
+
+
+@router.get("/{pid}/export")
+def export_project(pid: str):
+    """The whole project as a .zip with a single top-level folder named after the project id."""
+    d = project_dir(pid)
+    fd, tmp = tempfile.mkstemp(prefix="latexlocal-export-", suffix=".zip")
+    os.close(fd)
+    try:
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+            for p, rel in _export_files(d):
+                z.write(p, f"{pid}/{rel}")
+    except Exception:
+        os.unlink(tmp)
+        raise
+    return FileResponse(tmp, media_type="application/zip", filename=f"{pid}.zip",
+                        headers={"Cache-Control": "no-store"}, background=BackgroundTask(os.unlink, tmp))

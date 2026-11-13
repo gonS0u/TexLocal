@@ -4,3 +4,4 @@ frontend/dist/
 projects/*/.build/
 __pycache__/
 .pytest_cache/
+projects/*

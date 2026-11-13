@@ -132,3 +132,54 @@ def test_download_validation():
     assert c.post("/api/spell/download", json={"code": "zz"}).status_code == 400
     assert c.delete("/api/spell/languages/en_US").status_code in (400,)  # system dictionaries cannot be removed
     assert spell.CATALOG["pt_PT"][0] == "dictionary-pt-pt"
+
+
+def _make_project_with_build():
+    p = c.post("/api/projects", json={"name": "Copy src", "template": "thesis", "lang": "pt"}).json()
+    c.patch(f"/api/projects/{p['id']}", json={"engine": "lualatex"})
+    from app.paths import project_dir
+    d = project_dir(p["id"])
+    (d / ".build").mkdir(exist_ok=True)
+    (d / ".build" / "main.pdf").write_bytes(b"%PDF-fake")
+    (d / "img").mkdir()
+    (d / "img" / "fig.png").write_bytes(b"\x89PNG\r\n")
+    return p, d
+
+
+def _tree(d):
+    return sorted(q.relative_to(d).as_posix() for q in d.rglob("*")
+                  if q.is_file() and ".build" not in q.parts and q.name != "project.json")
+
+
+def test_copy_project():
+    p, d = _make_project_with_build()
+    r = c.post(f"/api/projects/{p['id']}/copy", json={"name": "Copy src v2"})
+    assert r.status_code == 200, r.text
+    m = r.json()
+    assert m["id"] != p["id"] and m["name"] == "Copy src v2"
+    assert m["engine"] == "lualatex" and m["main"] == "main.tex" and m["spell"] == "pt_PT"
+    from app.paths import project_dir
+    nd = project_dir(m["id"])
+    assert not (nd / ".build").exists()
+    assert _tree(nd) == _tree(d) and "img/fig.png" in _tree(nd)
+    assert (d / ".build" / "main.pdf").exists()  # original untouched
+    # default name
+    m2 = c.post(f"/api/projects/{p['id']}/copy", json={}).json()
+    assert m2["name"] == "Copy src (copy)" and m2["id"] not in (p["id"], m["id"])
+    assert c.post("/api/projects/does-not-exist/copy", json={}).status_code == 404
+
+
+def test_export_zip_roundtrip():
+    p, d = _make_project_with_build()
+    r = c.get(f"/api/projects/{p['id']}/export")
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "application/zip"
+    assert f'{p["id"]}.zip' in r.headers["content-disposition"]
+    names = zipfile.ZipFile(io.BytesIO(r.content)).namelist()
+    assert f"{p['id']}/main.tex" in names and f"{p['id']}/img/fig.png" in names
+    assert not any(".build" in n or n.endswith("project.json") for n in names)
+    assert all(n.startswith(p["id"] + "/") for n in names)
+    m = c.post("/api/projects/import/zip", files={"file": ("x.zip", r.content, "application/zip")}, data={"name": "Reimported"}).json()
+    from app.paths import project_dir
+    assert _tree(project_dir(m["id"])) == _tree(d)
+    assert m["main"] == "main.tex"
