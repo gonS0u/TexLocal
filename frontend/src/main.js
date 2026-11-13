@@ -230,10 +230,22 @@ class ProjectView {
     const pdfToolbar = el('div', { class: 'pdf-toolbar' },
       el('button', { class: 'icon-btn', title: t('Go to the cursor position in the PDF (Ctrl+Enter)'), onclick: () => this.syncToPdfFromCursor() }, '→'),
       el('button', { class: 'icon-btn', title: t('Zoom out'), onclick: () => this.pdf.zoom(1 / 1.15) }, '−'),
-      this.zoomLabel = el('span', { class: 'zoom' }, '100%'),
+      this.zoomLabel = el('span', { class: 'zoom', title: t('Actual size (100%)'), onclick: () => this.pdf.actualSize() }, '100%'),
       el('button', { class: 'icon-btn', title: t('Zoom in'), onclick: () => this.pdf.zoom(1.15) }, '+'),
       el('button', { class: 'icon-btn', title: t('Fit width'), onclick: () => this.pdf.fitWidth() }, '↔'),
-      this.pageLabel = el('span', { class: 'muted small' }),
+      el('button', { class: 'icon-btn small-txt', title: t('Actual size (100%)'), onclick: () => this.pdf.actualSize() }, '1:1'),
+      el('span', { class: 'page-ind', title: t('Page') },
+        this.pageInput = el('input', {
+          class: 'page-input', type: 'text', inputmode: 'numeric', value: '–', disabled: true, 'aria-label': t('Page'),
+          onkeydown: (e) => {
+            if (e.key === 'Enter') { this.pdf.goToPage(Number(this.pageInput.value)); this.pageInput.blur(); }
+            else if (e.key === 'Escape') { this.pageInput.blur(); }
+          },
+          onfocus: () => this.pageInput.select(),
+          onblur: () => this.pdf.notifyPage(true),
+          onchange: () => this.pdf.goToPage(Number(this.pageInput.value)),
+        }),
+        this.pageTotal = el('span', { class: 'page-total' }, '/ –')),
       el('div', { class: 'spacer' }),
       el('span', { class: 'muted small' }, t('Double-click → source')));
     const pdfHost = el('div', { class: 'pdf-host' });
@@ -295,7 +307,12 @@ class ProjectView {
 
     this.pdf = new PdfViewer(pdfHost, { onSyncToSource: (page, x, y) => this.syncToSource(page, x, y) });
     this.pdf.onScale = (s) => { this.zoomLabel.textContent = `${Math.round(s * 100)}%`; };
-    this.pdf.onPageCount = (n) => { this.pageLabel.textContent = t('{n} pp.', { n }); };
+    this.pdf.onPageChange = (page, total) => {
+      if (document.activeElement !== this.pageInput) this.pageInput.value = total ? String(page) : '–';
+      this.pageInput.disabled = !total;
+      this.pageInput.max = String(total || 1);
+      this.pageTotal.textContent = `/ ${total || '–'}`;
+    };
 
     this.log = new LogPanel(this.logHost, {
       onJump: (file, line) => this.openFile(file, { line }),
