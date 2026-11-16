@@ -65,7 +65,10 @@ export class LogPanel {
       },
       el('div', { class: 'log-loc' }, it.file || (it.line ? r.main : ''), it.line ? `:${it.line}` : ''),
       el('div', { class: 'log-msg' }, it.message),
-      it.context ? el('pre', { class: 'log-ctx' }, it.context) : null));
+      it.hint ? el('div', { class: 'log-hint' }, '💡 ' + t(it.hint, it.hint_params)) : null,
+      it.context ? el('pre', { class: 'log-ctx', title: t('Where:') }, it.context) : null,
+      it.help ? el('details', { class: 'log-help', onclick: (e) => e.stopPropagation() },
+        el('summary', {}, t('TeX explanation')), it.help) : null));
     }
   }
 }

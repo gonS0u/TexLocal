@@ -24,6 +24,8 @@ _locks: dict[str, asyncio.Lock] = {}
 # so serving it directly makes the preview vanish or show garbage.
 VIEW_DIR = ".view"
 
+NO_HALT = r"for ($latex, $pdflatex, $lualatex, $xelatex) { s/\s*-+halt-on-error//g if defined }"
+
 
 def _pdf_state(p: Path) -> str | None:
     """'complete' (has the %%EOF trailer), 'partial' (a PDF that TeX stopped writing,
@@ -100,6 +102,22 @@ def _latexmk_summary(output: str, base: Path) -> list[dict]:
     return errs
 
 
+def _locate_bib_entries(base: Path, items: list[dict]):
+    """Point biber messages about an entry at the line of `@type{key,` in its .bib file."""
+    cache: dict[Path, list[str]] = {}
+    for it in items:
+        key, f = it.pop("key", None), it.get("file")
+        if not key or not f:
+            continue
+        try:
+            fp = safe_path(base, f)
+            lines = cache.setdefault(fp, fp.read_text(errors="replace").splitlines())
+        except Exception:
+            continue
+        rx = re.compile(r"@\w+\s*[{(]\s*" + re.escape(key) + r"\s*,")
+        it["line"] = next((n for n, ln in enumerate(lines, 1) if rx.search(ln)), None)
+
+
 def view_pdf(pid: str) -> Path | None:
     """The PDF shown to the user: the last good one, published from .build/ if needed."""
     build = project_dir(pid) / BUILD_DIR_NAME
@@ -159,8 +177,18 @@ async def _compile(base: Path, main: str, engine: str) -> tuple[int, str]:
     if shutil.which("latexmk"):
         flag = {"pdflatex": "-pdf", "xelatex": "-xelatex", "lualatex": "-lualatex"}[engine]
         cmd = ["latexmk", flag, "-f", "-silent", f"-outdir={BUILD_DIR_NAME}",
-               *[f"-latexoption={o}" for o in common if o != "-halt-on-error"], main]
-        return await _run(cmd, base, env, deadline)
+               *[f"-latexoption={o}" for o in common if o != "-halt-on-error"],
+               # A project .latexmkrc may add --halt-on-error (e.g. via set_tex_cmds), which makes
+               # the first error fatal and leaves no PDF. -e runs after the rc files: strip it so
+               # TeX skips over errors (nonstopmode) and still produces the document.
+               "-e", NO_HALT, main]
+        rc, out = await _run(cmd, base, env, deadline)
+        # latexmk remembers a failed rule (e.g. biber) in .fdb_latexmk and refuses to rerun it
+        # until its inputs change, even with -f. Force one full run so a fixed cause recovers.
+        if "gave an error in previous invocation" in out:
+            rc, out2 = await _run([cmd[0], "-g", *cmd[1:]], base, env, deadline)
+            out = out + "\n" + out2
+        return rc, out
     # Fallback without latexmk: engine, bibtex/biber if needed, engine x2.
     if not shutil.which(engine):
         raise HTTPException(500, f"{engine} is not installed")
@@ -205,9 +233,15 @@ async def compile_project(pid: str, req: CompileReq):
     lock = _locks.setdefault(pid, asyncio.Lock())
     async with lock:
         build = base / BUILD_DIR_NAME
-        if req.clean and build.exists():
-            shutil.rmtree(build)
         stem = Path(main).with_suffix("").name
+        if req.clean:
+            # latexmk state may live in a project $aux_dir (e.g. .aux/), outside .build/.
+            fdb = f"{stem}.fdb_latexmk"
+            for p in [base / fdb, *base.glob(f"*/{fdb}")]:
+                if p.is_file():
+                    p.unlink()
+            if build.exists():
+                shutil.rmtree(build)
         raw = build / f"{stem}.pdf"
         before = raw.stat().st_mtime_ns if raw.exists() else None
         t0 = time.monotonic()
@@ -220,7 +254,10 @@ async def compile_project(pid: str, req: CompileReq):
     parsed = parse_log(log_text)
     blg = _aux_file(base, stem, "blg")
     if blg:
-        parsed["errors"] += parse_blg(blg.read_text(errors="replace"))
+        bib = parse_blg(blg.read_text(errors="replace"))
+        _locate_bib_entries(base, bib["errors"] + bib["warnings"])
+        parsed["errors"] += bib["errors"]
+        parsed["warnings"] += bib["warnings"]
     if rc != 0 and not parsed["errors"]:
         parsed["errors"] += _latexmk_summary(output, base)
     for item in parsed["errors"] + parsed["warnings"]:

@@ -268,3 +268,87 @@ def test_log_read_from_latexmkrc_aux_dir():
     assert not r["ok"]
     assert any("alignment tab" in e["message"] and e.get("line") == 3 for e in r["errors"]), r["errors"]
     assert "alignment tab" in c.get(f"/api/projects/{pid}/log").text
+
+
+@pytest.mark.skipif(not (shutil.which("latexmk") and shutil.which("biber")), reason="latexmk/biber not installed")
+def test_latexmk_recovers_from_remembered_biber_failure():
+    """latexmk stores a failed biber run in .fdb_latexmk and won't retry it while inputs are
+    unchanged ("gave an error in previous invocation"); compile must force a rerun."""
+    import re
+    from app.paths import project_dir
+    pid = c.post("/api/projects", json={"name": "Stuck biber", "template": "blank", "lang": "en"}).json()["id"]
+    c.put(f"/api/projects/{pid}/file", json={"path": ".latexmkrc", "content": "$aux_dir = '.aux';\n"})
+    c.put(f"/api/projects/{pid}/file", json={"path": "refs.bib", "content": "@book{k, author={A. B}, title={T}, year={2020}}\n"})
+    c.put(f"/api/projects/{pid}/file", json={"path": "main.tex", "content":
+          "\\documentclass{article}\n\\usepackage[backend=biber]{biblatex}\n\\addbibresource{refs.bib}\n"
+          "\\begin{document}\n\\cite{k}\n\\printbibliography\n\\end{document}\n"})
+    assert c.post(f"/api/projects/{pid}/compile", json={}).json()["ok"]
+    aux = project_dir(pid) / ".aux"
+    fdb = aux / "main.fdb_latexmk"
+    # Simulate an earlier biber failure: mark the rule as failed (last field = 2) and drop the .bbl.
+    fdb.write_text(re.sub(r'^(\["biber [^\n]*) \d+$', r"\1 2", fdb.read_text(), flags=re.M))
+    (aux / "main.bbl").unlink()
+    r = c.post(f"/api/projects/{pid}/compile", json={}).json()
+    assert r["ok"], r["errors"]
+    assert (aux / "main.bbl").exists()
+
+
+def test_clean_removes_latexmk_state_in_aux_dir():
+    from app.paths import project_dir
+    pid = c.post("/api/projects", json={"name": "Clean auxdir", "template": "blank", "lang": "en"}).json()["id"]
+    base = project_dir(pid)
+    (base / ".aux").mkdir()
+    (base / ".aux" / "main.fdb_latexmk").write_text("stale")
+    c.post(f"/api/projects/{pid}/compile", json={"clean": True})
+    assert not (base / ".aux" / "main.fdb_latexmk").exists()
+
+
+@pytest.mark.skipif(not shutil.which("latexmk"), reason="latexmk not installed")
+def test_errors_do_not_stop_pdf_even_with_halt_on_error_in_latexmkrc():
+    """A project .latexmkrc adding --halt-on-error must not make the first error fatal:
+    TeX skips the faulty part, the PDF is produced and every error is explained."""
+    pid = c.post("/api/projects", json={"name": "No halt", "template": "blank", "lang": "en"}).json()["id"]
+    c.put(f"/api/projects/{pid}/file", json={"path": ".latexmkrc", "content": "set_tex_cmds('--halt-on-error %O %S');\n"})
+    c.put(f"/api/projects/{pid}/file", json={"path": "main.tex", "content":
+          "\\documentclass{article}\n\\begin{document}\nOla\n\\foo{x}\n\nmais texto a_b\n\n\\end{document}\n"})
+    r = c.post(f"/api/projects/{pid}/compile", json={}).json()
+    assert not r["ok"] and r["pdf_updated"] and not r["pdf_partial"], r
+    undef = next(e for e in r["errors"] if "Undefined control sequence" in e["message"])
+    assert undef["line"] == 4 and undef["hint_params"]["cmd"] == "\\foo"
+    assert undef["context"].startswith("l.4") and undef["help"]
+    assert any("Missing $" in e["message"] and e["hint"] for e in r["errors"])
+
+
+def test_parse_log_hints_and_context():
+    from app.logparser import parse_log
+    log = ("./main.tex:7: LaTeX Error: Environment figur undefined.\n\n"
+           "See the LaTeX manual or LaTeX Companion for explanation.\n"
+           "Type  H <return>  for immediate help.\n ...                                              \n\n"
+           "l.7 \\begin{figur}\n                \n"
+           "Your command was ignored.\n\n"
+           "LaTeX Warning: Reference `fig:x' on page 1 undefined on input line 9.\n")
+    r = parse_log(log)
+    e = r["errors"][0]
+    assert e["line"] == 7 and e["hint_params"] == {"env": "figur"}
+    assert e["context"].startswith("l.7 \\begin{figur}") and e["help"] == "Your command was ignored."
+    w = r["warnings"][0]
+    assert w["hint_params"] == {"key": "fig:x"} and w["line"] == 9
+
+
+def test_parse_blg_biber_warnings():
+    from app.logparser import parse_blg
+    r = parse_blg("[146] Biber.pm:132> WARN - Datamodel: online entry 'mitre' (refs.bib): Missing mandatory field - one of 'date, year' must be defined\n"
+                  "[150] Utils.pm:411> ERROR - BibTeX subsystem: refs.bib, line 3, syntax error\n")
+    assert r["warnings"][0]["key"] == "mitre" and r["warnings"][0]["file"] == "refs.bib"
+    assert "Missing mandatory field" in r["warnings"][0]["message"]
+    assert len(r["errors"]) == 1
+
+
+def test_parse_blg_maps_temp_file_syntax_error_to_bib():
+    from app.logparser import parse_blg
+    r = parse_blg("[90] bibtex.pm:1519> INFO - Found BibTeX data source 'Bibliography/refs.bib'\n"
+                  "[123] Utils.pm:469> ERROR - BibTeX subsystem: /tmp/biber_tmp_2X5N/d8dd_77.utf8, line 104, "
+                  "syntax error: found \"file\", expected end of entry (\"}\" or \")\") (skipping to next \"@\")\n")
+    e = r["errors"][0]
+    assert e["file"] == "Bibliography/refs.bib" and e["line"] == 104 and "biber_tmp" not in e["message"]
+    assert e["hint_params"] == {"field": "file"}

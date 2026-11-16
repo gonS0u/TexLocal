@@ -495,9 +495,13 @@ class ProjectView {
       const r = await api.compile(this.pid);
       this.lastResult = r;
       this.log.set(r);
-      this.statusEl.className = `status ${r.ok ? 'ok' : r.errors.length ? 'err' : 'warn'}`;
-      this.statusEl.textContent = r.ok ? `✓ ${r.duration}s` : `✗ ${t('{n} error(s)', { n: r.errors.length })}`;
+      this.statusEl.className = `status ${r.ok ? 'ok' : r.errors.length && !(r.pdf_updated && !r.pdf_partial) ? 'err' : 'warn'}`;
+      const skipped = !r.ok && r.errors.length && r.pdf_updated && !r.pdf_partial;
+      this.statusEl.textContent = r.ok ? `✓ ${r.duration}s`
+        : skipped ? `⚠ ${t('{n} error(s) — PDF generated', { n: r.errors.length })}`
+          : `✗ ${t('{n} error(s)', { n: r.errors.length })}`;
       this.statusEl.title = r.ok ? t('Compiled successfully') : t('Show log');
+      if (skipped) this.statusEl.title += ' — ' + t('The PDF was generated anyway: TeX skipped the parts with errors, so they may look wrong or be missing.');
       if (r.pdf && r.pdf_updated === false) this.statusEl.title += ' — ' + t('The PDF was not updated: showing the last successful version.');
       if (r.pdf_partial) this.statusEl.title += ' — ' + t('The PDF is incomplete: compilation stopped at the first error.');
       this.statusEl.onclick = () => this.setLogOpen(true);
