@@ -3,7 +3,7 @@ import {
   EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter, drawSelection,
   dropCursor, rectangularSelection, crosshairCursor, highlightSpecialChars,
 } from '@codemirror/view';
-import { defaultKeymap, history, historyKeymap, indentWithTab, toggleComment } from '@codemirror/commands';
+import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
 import {
   StreamLanguage, syntaxHighlighting, HighlightStyle, bracketMatching, foldGutter, indentOnInput, foldKeymap,
 } from '@codemirror/language';
@@ -68,7 +68,7 @@ const theme = EditorView.theme({
  * Multi-file editor: one EditorView, one EditorState per open file.
  */
 export class Editor {
-  constructor(parent, { onSave, onSyncToPdf, onChange, getSymbols, spell }) {
+  constructor(parent, { onChange, getSymbols, spell }) {
     this.parent = parent;
     this.docs = new Map(); // path -> {state, savedContent}
     this.current = null;
@@ -84,11 +84,7 @@ export class Editor {
       this.wrap.of(EditorView.lineWrapping),
       spell ? spellcheck({ ...spell, getPath: () => this.current }) : [],
       keymap.of([
-        { key: 'Mod-s', preventDefault: true, run: () => { onSave(); return true; } },
-        { key: 'Mod-Enter', preventDefault: true, run: (v) => { const l = v.state.doc.lineAt(v.state.selection.main.head); onSyncToPdf(this.current, l.number, v.state.selection.main.head - l.from); return true; } },
-        { key: 'Mod-/', run: toggleComment },
-        { key: 'Mod-b', run: (v) => wrapSelection(v, '\\textbf{', '}') },
-        { key: 'Mod-i', run: (v) => wrapSelection(v, '\\textit{', '}') },
+        // App shortcuts (save, bold, …) are user-configurable: see shortcuts.js / ProjectView.keyHandler.
         ...closeBracketsKeymap, ...defaultKeymap, ...searchKeymap, ...historyKeymap, ...foldKeymap, ...completionKeymap, indentWithTab,
       ]),
       EditorView.updateListener.of((u) => {
@@ -184,7 +180,7 @@ export class Editor {
   }
 }
 
-function wrapSelection(view, before, after) {
+export function wrapSelection(view, before, after) {
   const changes = view.state.changeByRange((range) => ({
     changes: [{ from: range.from, insert: before }, { from: range.to, insert: after }],
     range: range.empty

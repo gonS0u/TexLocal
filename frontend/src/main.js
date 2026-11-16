@@ -6,6 +6,7 @@ import { buildPdfPane, pdfChannel } from './pdfpane.js';
 import { FileTree } from './filetree.js';
 import { LogPanel } from './logpanel.js';
 import { PackageManager } from './packages.js';
+import { openHelp, matchShortcut, isCapturing } from './shortcuts.js';
 
 const app = document.getElementById('app');
 // Theme: stored choice, else follow the system preference.
@@ -192,17 +193,24 @@ class ProjectView {
     this.compiling = false;
     this.pendingCompile = false;
     this.autoCompile = store.get('autocompile', false);
+    // Capture phase: runs before CodeMirror, so user shortcuts win over the editor's own keys.
     this.keyHandler = (e) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); this.saveAndCompile(); }
+      if (isCapturing() || !this.editor) return;
+      const b = matchShortcut(e);
+      if (!b) return;
+      if (b.editor && (!this.editor.current || !this.editor.view.hasFocus)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      b.run(this);
     };
-    window.addEventListener('keydown', this.keyHandler);
+    window.addEventListener('keydown', this.keyHandler, true);
     this.beforeUnload = (e) => { if (this.editor?.dirtyFiles().length) { e.preventDefault(); e.returnValue = ''; } };
     window.addEventListener('beforeunload', this.beforeUnload);
     this.init();
   }
 
   destroy() {
-    window.removeEventListener('keydown', this.keyHandler);
+    window.removeEventListener('keydown', this.keyHandler, true);
     window.removeEventListener('beforeunload', this.beforeUnload);
     this.pdf?.observer.disconnect();
     clearInterval(this.detachPoll);
@@ -274,9 +282,11 @@ class ProjectView {
     this.compileBtn = el('button', { class: 'btn primary compile-btn', onclick: () => this.saveAndCompile(), title: t('Save and compile (Ctrl+S)') }, '▶ ' + t('Compile'));
     this.statusEl = el('span', { class: 'status' });
     const autoCb = el('input', { type: 'checkbox', checked: this.autoCompile, onchange: () => { this.autoCompile = autoCb.checked; store.set('autocompile', this.autoCompile); } });
+    this.autoCb = autoCb;
     this.spellSel = el('select', { class: 'spell-select', title: t('Spell-check language'), onchange: () => this.setSpell(this.spellSel.value) });
     this.refreshSpellLanguages();
     const wrapCb = el('input', { type: 'checkbox', checked: store.get('wrap', true), onchange: () => { this.editor.setWrap(wrapCb.checked); store.set('wrap', wrapCb.checked); } });
+    this.wrapCb = wrapCb;
 
     const top = el('header', { class: 'topbar' },
       el('a', { class: 'brand', href: '#' }, el('span', { class: 'logo' }, 'TeX'), ''),
@@ -284,7 +294,7 @@ class ProjectView {
       el('div', { class: 'spacer' }),
       this.compileBtn,
       this.engineSel,
-      el('label', { class: 'check', title: t('Compile automatically ~2s after you stop typing') }, autoCb, t('Auto')),
+      el('label', { class: 'check', title: t('Compile automatically ~1s after you stop typing') }, autoCb, t('Auto')),
       el('label', { class: 'check', title: t('Wrap lines in the editor') }, wrapCb, t('Wrap')),
       this.spellSel,
       el('button', { class: 'icon-btn', title: t('Smaller font'), onclick: () => this.fontSize(-1) }, 'A−'),
@@ -295,6 +305,7 @@ class ProjectView {
       el('button', { class: 'btn ghost project-menu-btn', onclick: (e) => { e.stopPropagation(); this.projectMenu(e.currentTarget); } }, t('Project') + ' ▾'),
       langSwitch(),
       themeBtn(),
+      el('button', { class: 'btn ghost help-btn', title: t('Help and shortcuts (F1)'), onclick: () => this.openHelp() }, '?'),
     );
 
     const treePane = el('aside', { class: 'pane tree-pane' });
@@ -358,8 +369,6 @@ class ProjectView {
     });
 
     this.editor = new Editor(editorHost, {
-      onSave: () => this.saveAndCompile(),
-      onSyncToPdf: (file, line, col) => this.syncToPdf(file, line, col),
       onChange: () => { this.renderTabs(); this.scheduleAuto(); },
       getSymbols: () => this.symbols && { ...this.symbols, files: this.tree.allFiles() },
       spell: { getLang: () => this.meta.spell || 'off' },
@@ -409,6 +418,20 @@ class ProjectView {
   }
 
   toggleLog() { this.setLogOpen(!this.sizes.logOpen); }
+
+  toggleWrap() { this.wrapCb.checked = !this.wrapCb.checked; this.wrapCb.dispatchEvent(new Event('change')); }
+
+  toggleAuto() {
+    this.autoCb.checked = !this.autoCb.checked;
+    this.autoCb.dispatchEvent(new Event('change'));
+    toast(this.autoCompile ? t('Auto-compile on') : t('Auto-compile off'));
+  }
+
+  openPackages() { pm.open('missing', this.lastResult?.missing || []); }
+
+  toggleTheme() { toggleTheme(); }
+
+  openHelp() { openHelp(); }
 
   persistTabs() { store.set(`open:${this.pid}`, { tabs: this.tabs, active: this.editor.current }); }
 
@@ -464,11 +487,11 @@ class ProjectView {
 
   async saveAll() {
     const dirty = this.editor.dirtyFiles();
-    for (const p of dirty) {
+    await Promise.all(dirty.map(async (p) => {
       const content = this.editor.content(p);
       await api.writeFile(this.pid, p, content);
       this.editor.markSaved(p, content);
-    }
+    }));
     if (dirty.length) { this.renderTabs(); this.refreshSymbols(); }
     return dirty.length;
   }
@@ -476,7 +499,7 @@ class ProjectView {
   scheduleAuto() {
     if (!this.autoCompile) return;
     clearTimeout(this.autoTimer);
-    this.autoTimer = setTimeout(() => this.saveAndCompile(), 2000);
+    this.autoTimer = setTimeout(() => this.saveAndCompile(), 1000);
   }
 
   async saveAndCompile() {
@@ -571,8 +594,9 @@ class ProjectView {
   syncToPdfFromCursor() {
     const v = this.editor.view;
     if (!this.editor.current) return;
-    const l = v.state.doc.lineAt(v.state.selection.main.head);
-    this.syncToPdf(this.editor.current, l.number, 0);
+    const head = v.state.selection.main.head;
+    const l = v.state.doc.lineAt(head);
+    this.syncToPdf(this.editor.current, l.number, head - l.from);
   }
 
   async syncToPdf(file, line, col) {
@@ -598,7 +622,7 @@ class DetachedPdfView {
     this.pid = pid;
     this.chan = pdfChannel(pid);
     this.keyHandler = (e) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); this.chan.postMessage({ type: 'compile' }); }
+      if (matchShortcut(e)?.id === 'compile') { e.preventDefault(); this.chan.postMessage({ type: 'compile' }); }
     };
     window.addEventListener('keydown', this.keyHandler);
     this.bye = () => this.chan.postMessage({ type: 'bye' });

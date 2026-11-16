@@ -269,3 +269,23 @@ input:focus-visible, select:focus-visible, button:focus-visible { outline: 2px s
 .import-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .dropzone { border: 2px dashed var(--border); border-radius: 10px; padding: 14px; text-align: center; color: var(--muted); margin-top: 10px; }
 .dropzone.drop { border-color: var(--accent); color: var(--fg); background: var(--accent-soft); }
+
+/* ---- help & shortcuts */
+.sc-modal { width: min(760px, 100%); }
+.sc-body { padding: 8px 16px 16px; overflow: auto; }
+.sc-body h3 { font-size: 14px; margin: 18px 0 6px; }
+.sc-body p { margin: 4px 0 8px; }
+.sc-row { display: flex; align-items: center; gap: 10px; padding: 5px 0; border-bottom: 1px solid var(--border); }
+.sc-name { flex: 1; min-width: 0; }
+.sc-name code { font-family: var(--mono); font-size: 12px; opacity: 0.75; }
+.sc-keys { display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; }
+.kbd { display: inline-flex; align-items: center; gap: 2px; font-family: var(--mono); font-size: 12px; padding: 1px 6px; border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 5px; background: var(--panel); white-space: nowrap; }
+.kbd-x { background: none; border: none; color: var(--muted); cursor: pointer; padding: 0 0 0 3px; font-size: 13px; line-height: 1; }
+.kbd-x:hover { color: var(--danger); }
+.sc-capture { outline: 2px solid var(--accent); animation: sc-pulse 1s infinite alternate; }
+@keyframes sc-pulse { from { opacity: 1; } to { opacity: 0.6; } }
+.sc-new { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.sc-new input { flex: 1 1 140px; min-width: 0; }
+.sc-new input.mono { font-family: var(--mono); }
+.sc-foot { display: flex; justify-content: flex-end; margin-top: 16px; }
+.help-btn { font-weight: 700; }
