@@ -4,6 +4,7 @@ import { t, getLang, setLang, fmtDate } from './i18n.js';
 import { Editor } from './editor.js';
 import { buildPdfPane, pdfChannel } from './pdfpane.js';
 import { FileTree } from './filetree.js';
+import { Outline } from './outline.js';
 import { LogPanel } from './logpanel.js';
 import { PackageManager } from './packages.js';
 import { openHelp, matchShortcut, isCapturing } from './shortcuts.js';
@@ -214,6 +215,7 @@ class ProjectView {
     window.removeEventListener('beforeunload', this.beforeUnload);
     this.pdf?.observer.disconnect();
     clearInterval(this.detachPoll);
+    clearTimeout(this.outlineTimer);
     this.chan?.close();
   }
 
@@ -308,7 +310,10 @@ class ProjectView {
       el('button', { class: 'btn ghost help-btn', title: t('Help and shortcuts (F1)'), onclick: () => this.openHelp() }, '?'),
     );
 
-    const treePane = el('aside', { class: 'pane tree-pane' });
+    const treeHost = el('div', { class: 'tree-host' });
+    const gOutline = el('div', { class: 'gutter-h outline-gutter' });
+    const outlineHost = el('div', { class: 'outline-pane' });
+    const treePane = el('aside', { class: 'pane tree-pane' }, treeHost, gOutline, outlineHost);
     this.tabBar = el('div', { class: 'tabbar' });
     const editorHost = el('div', { class: 'editor-host' });
     this.imgPreview = el('div', { class: 'img-preview hidden' });
@@ -332,11 +337,12 @@ class ProjectView {
     this.mainArea = el('div', { class: 'main-area' }, this.workspace, gLog, this.logHost);
     app.append(top, this.mainArea, this.logToggle);
 
-    const sizes = store.get('sizes', { tree: 220, editor: 50, log: 200, logOpen: false });
+    const sizes = { outline: 220, outlineOpen: true, ...store.get('sizes', { tree: 220, editor: 50, log: 200, logOpen: false }) };
     this.sizes = sizes;
     treePane.style.width = `${sizes.tree}px`;
     editorPane.style.flexBasis = `${sizes.editor}%`;
     this.logHost.style.height = `${sizes.log}px`;
+    outlineHost.style.height = `${sizes.outline}px`;
     this.setLogOpen(sizes.logOpen);
     this.dragGutter(g1, (dx, start) => { sizes.tree = Math.max(120, Math.min(500, start.tree + dx)); treePane.style.width = `${sizes.tree}px`; }, () => ({ tree: treePane.offsetWidth }));
     this.dragGutter(g2, (dx, start) => {
@@ -344,9 +350,16 @@ class ProjectView {
       sizes.editor = Math.max(15, Math.min(85, ((start.w + dx) / total) * 100));
       editorPane.style.flexBasis = `${sizes.editor}%`;
     }, () => ({ w: editorPane.offsetWidth }));
+    this.dragGutter(gOutline, (dx, start, dy) => { sizes.outline = Math.max(60, Math.min(treePane.clientHeight - 80, start.h - dy)); outlineHost.style.height = `${sizes.outline}px`; }, () => ({ h: outlineHost.offsetHeight }));
     this.dragGutter(gLog, (dx, start, dy) => { sizes.log = Math.max(80, Math.min(window.innerHeight * 0.7, start.h - dy)); this.logHost.style.height = `${sizes.log}px`; }, () => ({ h: this.logHost.offsetHeight }));
 
-    this.tree = new FileTree(treePane, {
+    this.outline = new Outline(outlineHost, {
+      open: sizes.outlineOpen,
+      onGoto: (line) => this.editor.current && this.editor.goto(line),
+      onToggle: (open) => { sizes.outlineOpen = open; store.set('sizes', sizes); },
+    });
+
+    this.tree = new FileTree(treeHost, {
       projectId: this.pid,
       onOpen: (n) => this.openFile(n.path),
       getMain: () => this.meta.main,
@@ -370,6 +383,7 @@ class ProjectView {
 
     this.editor = new Editor(editorHost, {
       onChange: () => { this.renderTabs(); this.scheduleAuto(); },
+      onUpdate: (docChanged) => this.updateOutline(docChanged),
       getSymbols: () => this.symbols && { ...this.symbols, files: this.tree.allFiles() },
       spell: { getLang: () => this.meta.spell || 'off' },
     });
@@ -418,6 +432,18 @@ class ProjectView {
   }
 
   toggleLog() { this.setLogOpen(!this.sizes.logOpen); }
+
+  /** Re-parse the outline (now on file switch, debounced while typing) and highlight the cursor's section. */
+  updateOutline(change) {
+    const sync = () => {
+      const v = this.editor.view;
+      this.outline.setCursorLine(v.state.doc.lineAt(v.state.selection.main.head).number);
+    };
+    if (!change) { sync(); return; }
+    clearTimeout(this.outlineTimer);
+    const run = () => { this.outline.update(this.editor.current && this.editor.view.state.doc, this.editor.current); sync(); };
+    if (change === 'switch') run(); else this.outlineTimer = setTimeout(run, 200);
+  }
 
   toggleWrap() { this.wrapCb.checked = !this.wrapCb.checked; this.wrapCb.dispatchEvent(new Event('change')); }
 

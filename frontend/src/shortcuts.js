@@ -15,6 +15,7 @@ export const ACTIONS = [
   { id: 'comment', label: 'Comment/uncomment lines', keys: ['Mod-/'], editor: true, run: (c) => toggleComment(sel(c)) },
   { id: 'bold', label: 'Bold (\\textbf)', keys: ['Mod-b'], editor: true, run: (c) => wrapSelection(sel(c), '\\textbf{', '}') },
   { id: 'italic', label: 'Italic (\\textit)', keys: ['Mod-i'], editor: true, run: (c) => wrapSelection(sel(c), '\\textit{', '}') },
+  { id: 'toggleOutline', label: 'Show/hide outline', keys: [], run: (c) => c.outline.setOpen(!c.outline.open) },
   { id: 'toggleLog', label: 'Show/hide the log', keys: [], run: (c) => c.toggleLog() },
   { id: 'fontUp', label: 'Larger font', keys: [], run: (c) => c.fontSize(1) },
   { id: 'fontDown', label: 'Smaller font', keys: [], run: (c) => c.fontSize(-1) },

@@ -289,3 +289,22 @@ input:focus-visible, select:focus-visible, button:focus-visible { outline: 2px s
 .sc-new input.mono { font-family: var(--mono); }
 .sc-foot { display: flex; justify-content: flex-end; margin-top: 16px; }
 .help-btn { font-weight: 700; }
+
+/* outline (below the file tree) */
+.tree-pane { display: flex; flex-direction: column; }
+.tree-host { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 60px; }
+.tree-pane .outline-gutter { display: block; }
+.outline-pane { flex: 0 0 auto; display: flex; flex-direction: column; min-height: 0; }
+.outline-pane.collapsed { height: auto !important; }
+.outline-pane.collapsed .outline-list { display: none; }
+.tree-pane:has(.outline-pane.collapsed) .outline-gutter { display: none; }
+.outline-head { cursor: pointer; user-select: none; gap: 4px; }
+.outline-arrow { color: var(--muted); font-size: 11px; width: 10px; }
+.outline-list { flex: 1; overflow: auto; padding: 4px 0; position: relative; }
+.outline-row { display: flex; align-items: center; gap: 6px; padding: 2px 8px; cursor: pointer; font-size: 12.5px; white-space: nowrap; }
+.outline-row:hover { background: var(--active-line); }
+.outline-row.active { background: var(--accent-soft); }
+.outline-row.lvl0, .outline-row.lvl1 { font-weight: 600; }
+.outline-icon { flex: 0 0 auto; width: 12px; text-align: center; color: var(--muted); font-size: 11px; }
+.outline-text { overflow: hidden; text-overflow: ellipsis; }
+.outline-empty { padding: 8px 10px; color: var(--muted); font-size: 12px; font-style: italic; }

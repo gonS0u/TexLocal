@@ -68,11 +68,12 @@ const theme = EditorView.theme({
  * Multi-file editor: one EditorView, one EditorState per open file.
  */
 export class Editor {
-  constructor(parent, { onChange, getSymbols, spell }) {
+  constructor(parent, { onChange, onUpdate, getSymbols, spell }) {
     this.parent = parent;
     this.docs = new Map(); // path -> {state, savedContent}
     this.current = null;
     this.onChange = onChange;
+    this.onUpdate = onUpdate;
     this.wrap = new Compartment();
     this.extensions = [
       lineNumbers(), highlightActiveLineGutter(), highlightSpecialChars(), history(), foldGutter(), drawSelection(), dropCursor(),
@@ -93,6 +94,7 @@ export class Editor {
           if (d) d.dirty = u.state.doc.toString() !== d.saved;
           this.onChange?.(this.current, d?.dirty);
         }
+        if (u.docChanged || u.selectionSet) this.onUpdate?.(u.docChanged);
       }),
       theme,
     ];
@@ -110,6 +112,7 @@ export class Editor {
     this.view.setState(d.state);
     this.applyDiagnostics();
     this.view.focus();
+    this.onUpdate?.('switch');
   }
 
   has(path) { return this.docs.has(path); }
@@ -119,6 +122,7 @@ export class Editor {
     if (this.current === path) {
       this.current = null;
       this.view.setState(EditorState.create({ doc: '', extensions: [...this.extensions, EditorState.readOnly.of(true)] }));
+      this.onUpdate?.('switch');
     }
   }
 

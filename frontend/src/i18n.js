@@ -293,6 +293,10 @@ const PT = {
   "Syntax error in the .bib file: a comma is probably missing at the end of the line before “{field}” (every field except the last must end with a comma).": "Erro de sintaxe no ficheiro .bib: provavelmente falta uma vírgula no fim da linha antes de “{field}” (todos os campos, exceto o último, têm de terminar com vírgula).",
   "TeX explanation": "Explicação do TeX",
   "Where:": "Onde:",
+  // ---- outline (outline.js)
+  "Outline": "Estrutura",
+  "No sections in this file": "Sem secções neste ficheiro",
+  "Show/hide outline": "Mostrar/esconder estrutura",
   // ---- help & shortcuts (shortcuts.js)
   'Help and shortcuts': 'Ajuda e atalhos',
   'Help and shortcuts (F1)': 'Ajuda e atalhos (F1)',
