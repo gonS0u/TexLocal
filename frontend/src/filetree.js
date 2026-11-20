@@ -24,10 +24,7 @@ export class FileTree {
 
     const toolbar = el('div', { class: 'tree-toolbar' },
       el('span', { class: 'tree-title' }, t('Files')),
-      el('button', { title: t('New file'), onclick: () => this.newItem('file') }, '＋📄'),
-      el('button', { title: t('New folder'), onclick: () => this.newItem('folder') }, '＋📁'),
-      el('button', { title: t('Upload files'), onclick: () => this.fileInput.click() }, '⬆'),
-      el('button', { title: t('Upload folder'), onclick: () => this.folderInput.click() }, '⬆📁'),
+      el('button', { class: 'tree-add-btn', title: t('Create or upload'), onclick: (e) => { e.stopPropagation(); this.addMenu(e.currentTarget); } }, '＋ ▾'),
     );
     this.fileInput = el('input', { type: 'file', multiple: true, style: { display: 'none' }, onchange: () => this.uploadFiles(this.fileInput.files) });
     this.folderInput = el('input', { type: 'file', multiple: true, webkitdirectory: true, style: { display: 'none' }, onchange: () => this.uploadFiles(this.folderInput.files) });
@@ -113,6 +110,26 @@ export class FileTree {
   }
 
   closeMenu() { this.menu?.remove(); this.menu = null; }
+
+  /** The toolbar "＋" menu: create file/folder, upload files/folder. */
+  addMenu(btn) {
+    if (this.menu?.classList.contains('add-menu')) { this.closeMenu(); return; }
+    this.closeMenu();
+    const r = btn.getBoundingClientRect();
+    const item = (label, fn) => el('div', { class: 'menu-item', onclick: () => { this.closeMenu(); fn(); } }, label);
+    this.menu = el('div', { class: 'context-menu add-menu', style: { top: `${r.bottom + 4}px`, left: `${r.left}px` } },
+      el('div', { class: 'menu-label' }, t('Create')),
+      item('📄 ' + t('New file'), () => this.newItem('file')),
+      item('📁 ' + t('New folder'), () => this.newItem('folder')),
+      el('div', { class: 'menu-sep' }),
+      el('div', { class: 'menu-label' }, t('Upload')),
+      item('⬆ ' + t('Files…'), () => this.fileInput.click()),
+      item('⬆ ' + t('Folder…'), () => this.folderInput.click()),
+      this.selectedFolder ? el('div', { class: 'menu-sep' }) : null,
+      this.selectedFolder ? el('div', { class: 'menu-hint' }, t('in: {folder}', { folder: this.selectedFolder + '/' })) : null,
+    );
+    document.body.append(this.menu);
+  }
 
   contextMenu(e, n) {
     this.closeMenu();
