@@ -8,6 +8,7 @@ import { Outline } from './outline.js';
 import { LogPanel } from './logpanel.js';
 import { PackageManager } from './packages.js';
 import { openHelp, matchShortcut, isCapturing } from './shortcuts.js';
+import { openHistory } from './history.js';
 
 const app = document.getElementById('app');
 // Theme: stored choice, else follow the system preference.
@@ -304,6 +305,7 @@ class ProjectView {
       this.statusEl,
       el('button', { class: 'btn ghost', onclick: () => pm.open('missing', this.lastResult?.missing || []) }, '📦 ' + t('Packages')),
       el('a', { class: 'btn ghost', href: api.pdfDownloadUrl(this.pid), title: t('Download PDF') }, '⬇ PDF'),
+      el('button', { class: 'btn ghost', title: t('Version history'), onclick: () => this.openHistory() }, '🕘 ' + t('History')),
       el('button', { class: 'btn ghost project-menu-btn', onclick: (e) => { e.stopPropagation(); this.projectMenu(e.currentTarget); } }, t('Project') + ' ▾'),
       langSwitch(),
       themeBtn(),
@@ -400,6 +402,7 @@ class ProjectView {
 
   projectMenu(btn) {
     dropdown(btn, [
+      [t('Version history…'), () => this.openHistory()],
       [t('Make a copy…'), async () => {
         try { await this.saveAll(); } catch (e) { toast(t('Error saving: {msg}', { msg: e.message }), 'error'); return; }
         const m = await copyProject(this.meta);
@@ -458,6 +461,24 @@ class ProjectView {
   toggleTheme() { toggleTheme(); }
 
   openHelp() { openHelp(); }
+
+  async openHistory() {
+    try { await this.saveAll(); } catch (e) { toast(t('Error saving: {msg}', { msg: e.message }), 'error'); return; }
+    openHistory(this);
+  }
+
+  /** After a version was restored: refresh the tree and the open tabs from disk. */
+  async reloadFromDisk() {
+    await this.tree.refresh();
+    const files = new Set(this.tree.allFiles());
+    for (const p of [...this.tabs]) {
+      if (!files.has(p)) { this.closeTab(p, true); continue; }
+      if (!this.editor.has(p)) continue;
+      try { this.editor.reload(p, (await api.readFile(this.pid, p)).content); } catch { /* binary or gone */ }
+    }
+    this.renderTabs();
+    this.refreshSymbols();
+  }
 
   persistTabs() { store.set(`open:${this.pid}`, { tabs: this.tabs, active: this.editor.current }); }
 
@@ -518,7 +539,11 @@ class ProjectView {
       await api.writeFile(this.pid, p, content);
       this.editor.markSaved(p, content);
     }));
-    if (dirty.length) { this.renderTabs(); this.refreshSymbols(); }
+    if (dirty.length) {
+      this.renderTabs();
+      this.refreshSymbols();
+      api.snapshot(this.pid, '', true).catch(() => {});
+    }
     return dirty.length;
   }
 

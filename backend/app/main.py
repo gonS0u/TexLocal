@@ -2,12 +2,12 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import compiler, files, importer, packages, projects, spell, symbols, synctex
+from . import compiler, files, history, importer, packages, projects, spell, symbols, synctex
 from .config import FRONTEND_DIST
 
 app = FastAPI(title="LaTeX Local")
 
-for r in (importer.router, spell.router, projects.router, files.router, compiler.router, synctex.router, symbols.router, packages.router, packages.proj_router):
+for r in (importer.router, spell.router, projects.router, files.router, compiler.router, synctex.router, symbols.router, history.router, packages.router, packages.proj_router):
     app.include_router(r)
 
 

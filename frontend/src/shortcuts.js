@@ -22,6 +22,7 @@ export const ACTIONS = [
   { id: 'toggleWrap', label: 'Wrap lines on/off', keys: [], run: (c) => c.toggleWrap() },
   { id: 'toggleAuto', label: 'Auto-compile on/off', keys: [], run: (c) => c.toggleAuto() },
   { id: 'detachPdf', label: 'Open/reattach the PDF window', keys: [], run: (c) => (c.detached ? c.reattachPdf() : c.detachPdf()) },
+  { id: 'history', label: 'Version history', keys: [], run: (c) => c.openHistory() },
   { id: 'packages', label: 'Packages & dictionaries', keys: [], run: (c) => c.openPackages() },
   { id: 'theme', label: 'Light/dark theme', keys: [], run: (c) => c.toggleTheme() },
   { id: 'help', label: 'Help and shortcuts', keys: ['F1'], run: (c) => c.openHelp() },

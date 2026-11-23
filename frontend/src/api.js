@@ -47,6 +47,14 @@ export const api = {
   moveFile: (id, path, new_path) => req('PATCH', `${P(id)}/file`, { path, new_path }),
   deleteFile: (id, path) => req('DELETE', `${P(id)}/file?${q({ path })}`),
   rawUrl: (id, path) => `${P(id)}/raw?${q({ path })}`,
+
+  history: (id) => req('GET', `${P(id)}/history`),
+  snapshot: (id, label = '', auto = false) => req('POST', `${P(id)}/history`, { label, auto }),
+  deleteVersion: (id, vid) => req('DELETE', `${P(id)}/history/${vid}`),
+  versionFiles: (id, vid) => req('GET', `${P(id)}/history/${vid}/files`),
+  versionDiff: (id, vid, path) => req('GET', `${P(id)}/history/${vid}/diff?${q({ path })}`),
+  restoreVersion: (id, vid, path = null) => req('POST', `${P(id)}/history/${vid}/restore`, { path }),
+  versionZipUrl: (id, vid) => `${P(id)}/history/${vid}/zip`,
   /** files: File[] or [{file, path}] (path keeps sub-folders). */
   upload: (id, folder, files) => {
     const fd = new FormData();

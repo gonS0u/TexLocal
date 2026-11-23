@@ -117,6 +117,20 @@ export class Editor {
 
   has(path) { return this.docs.has(path); }
 
+  /** Replace a file's content (e.g. after restoring a version); it becomes the saved content. */
+  reload(path, content) {
+    const d = this.docs.get(path);
+    if (!d) return;
+    d.state = EditorState.create({ doc: content, extensions: this.extensions });
+    d.saved = content;
+    d.dirty = false;
+    if (this.current === path) {
+      this.view.setState(d.state);
+      this.applyDiagnostics();
+      this.onUpdate?.('switch');
+    }
+  }
+
   close(path) {
     this.docs.delete(path);
     if (this.current === path) {

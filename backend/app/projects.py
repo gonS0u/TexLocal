@@ -238,7 +238,7 @@ def copy_project(pid: str, body: ProjectCopy | None = None):
     name = ((body.name if body else None) or "").strip()[:120] or f"{meta['name']} (copy)"
     new_id = new_project_id(name)
     dst = project_dir(new_id, must_exist=False)
-    shutil.copytree(src, dst, symlinks=True, ignore=shutil.ignore_patterns(BUILD_DIR_NAME))
+    shutil.copytree(src, dst, symlinks=True, ignore=shutil.ignore_patterns(BUILD_DIR_NAME, ".history"))
     write_meta(new_id, {**meta, "name": name, "created": time.time()})
     return read_meta(new_id)
 
@@ -247,7 +247,7 @@ def _export_files(d):
     """Project sources to export: no build output, no metadata, no symlinks."""
     for p in sorted(d.rglob("*")):
         rel = p.relative_to(d)
-        if BUILD_DIR_NAME in rel.parts or rel.as_posix() == META:
+        if BUILD_DIR_NAME in rel.parts or ".history" in rel.parts or rel.as_posix() == META:
             continue
         if p.is_symlink() or not p.is_file():
             continue

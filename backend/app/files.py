@@ -12,7 +12,7 @@ from .projects import META
 router = APIRouter(prefix="/api/projects/{pid}", tags=["files"])
 
 TEXT_EXT = {".tex", ".bib", ".sty", ".cls", ".bst", ".txt", ".md", ".csv", ".dat", ".tikz", ".bbx", ".cbx", ".lbx", ".cfg", ".def", ".ltx", ".dtx", ".ins", ".json", ".yaml", ".yml", ".py", ".r", ".m", ".lua", ".svg", ".xml", ".log"}
-HIDDEN = {BUILD_DIR_NAME, META, ".git"}
+HIDDEN = {BUILD_DIR_NAME, META, ".git", ".history"}
 
 
 class FileWrite(BaseModel):
