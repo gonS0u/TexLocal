@@ -91,8 +91,10 @@ export class Editor {
       EditorView.updateListener.of((u) => {
         if (u.docChanged && this.current) {
           const d = this.docs.get(this.current);
-          if (d) d.dirty = u.state.doc.toString() !== d.saved;
-          this.onChange?.(this.current, d?.dirty);
+          // Length check first: the full-document string copy only happens when lengths match.
+          const was = d?.dirty;
+          if (d) d.dirty = u.state.doc.length !== d.saved.length || u.state.doc.toString() !== d.saved;
+          this.onChange?.(this.current, d?.dirty, was !== d?.dirty);
         }
         if (u.docChanged || u.selectionSet) this.onUpdate?.(u.docChanged);
       }),
@@ -155,12 +157,16 @@ export class Editor {
 
   dirtyFiles() {
     if (this.current && this.docs.has(this.current)) this.docs.get(this.current).state = this.view.state;
-    return [...this.docs.entries()].filter(([, d]) => d.state.doc.toString() !== d.saved).map(([p]) => p);
+    return [...this.docs.entries()].filter(([, d]) => d.dirty).map(([p]) => p);
   }
 
   markSaved(path, content) {
     const d = this.docs.get(path);
-    if (d) { d.saved = content; d.dirty = false; }
+    if (!d) return;
+    d.saved = content;
+    // The user may have kept typing while the save was in flight.
+    const doc = (path === this.current ? this.view.state : d.state).doc;
+    d.dirty = doc.length !== content.length || doc.toString() !== content;
   }
 
   goto(line, column = 0) {

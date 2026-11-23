@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# LaTeX Local — arranca a plataforma em http://127.0.0.1:8000
+# LaTeX Local — arranca a plataforma em http://127.0.0.1:8765
 set -euo pipefail
 cd "$(dirname "$0")"
 PORT="${PORT:-8765}"

@@ -1,6 +1,7 @@
 import asyncio
 import os
 import re
+import signal
 import shutil
 import time
 from pathlib import Path
@@ -17,6 +18,8 @@ from .projects import read_meta
 router = APIRouter(prefix="/api/projects/{pid}", tags=["compile"])
 
 _locks: dict[str, asyncio.Lock] = {}
+# Cap on simultaneous TeX runs across all projects.
+_slots = asyncio.Semaphore(int(os.environ.get("LATEX_MAX_COMPILES", "3")))
 
 # The viewer is served a stable copy of the last *good* PDF (plus its SyncTeX file),
 # published atomically after each compilation. The raw output in .build/ is rewritten
@@ -148,20 +151,26 @@ def _env(base: Path) -> dict:
 
 def _mirror_dirs(base: Path, build: Path):
     """\\include{dir/file} writes dir/file.aux inside the output dir: create it."""
-    for d in base.rglob("*"):
-        if d.is_dir() and not any(part.startswith(".") for part in d.relative_to(base).parts):
-            (build / d.relative_to(base)).mkdir(parents=True, exist_ok=True)
+    for root, dirs, _ in os.walk(base):
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d != "node_modules"]
+        rel = Path(root).relative_to(base)
+        for d in dirs:
+            (build / rel / d).mkdir(parents=True, exist_ok=True)
 
 
 async def _run(cmd: list[str], cwd: Path, env: dict, deadline: float) -> tuple[int, str]:
     proc = await asyncio.create_subprocess_exec(
         *cmd, cwd=cwd, env=env, stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+        start_new_session=True,  # own process group, so a timeout can kill latexmk's children too
     )
     try:
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=max(1, deadline - time.monotonic()))
     except asyncio.TimeoutError:
-        proc.kill()
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            proc.kill()
         await proc.wait()
         raise HTTPException(504, f"Compilation exceeded {COMPILE_TIMEOUT}s")
     return proc.returncode, out.decode("utf-8", "replace")
@@ -170,7 +179,7 @@ async def _run(cmd: list[str], cwd: Path, env: dict, deadline: float) -> tuple[i
 async def _compile(base: Path, main: str, engine: str) -> tuple[int, str]:
     build = base / BUILD_DIR_NAME
     build.mkdir(exist_ok=True)
-    _mirror_dirs(base, build)
+    await asyncio.to_thread(_mirror_dirs, base, build)
     env = _env(base)
     deadline = time.monotonic() + COMPILE_TIMEOUT
     common = ["-synctex=1", "-interaction=nonstopmode", "-file-line-error", "-halt-on-error"]
@@ -221,7 +230,7 @@ async def _compile(base: Path, main: str, engine: str) -> tuple[int, str]:
 @router.post("/compile")
 async def compile_project(pid: str, req: CompileReq):
     base = project_dir(pid)
-    meta = read_meta(pid)
+    meta = read_meta(pid, with_modified=False)
     engine = req.engine or meta.get("engine", "pdflatex")
     main = req.main or meta.get("main", "main.tex")
     if engine not in ENGINES:
@@ -231,7 +240,7 @@ async def compile_project(pid: str, req: CompileReq):
         raise HTTPException(400, f"Main file '{main}' does not exist")
     main = main_path.relative_to(base).as_posix()
     lock = _locks.setdefault(pid, asyncio.Lock())
-    async with lock:
+    async with lock, _slots:
         build = base / BUILD_DIR_NAME
         stem = Path(main).with_suffix("").name
         if req.clean:
@@ -248,7 +257,12 @@ async def compile_project(pid: str, req: CompileReq):
         rc, output = await _compile(base, main, engine)
         dt = time.monotonic() - t0
         produced = raw.exists() and raw.stat().st_mtime_ns != before
-        updated = bool(produced and _publish(build, stem))
+        updated = bool(produced and await asyncio.to_thread(_publish, build, stem))
+    return await asyncio.to_thread(_report, base, build, stem, main, engine, rc, output, dt, updated)
+
+
+def _report(base: Path, build: Path, stem: str, main: str, engine: str, rc: int, output: str, dt: float, updated: bool) -> dict:
+    """Parse logs and build the response (blocking file I/O, run off the event loop)."""
     log_file = _aux_file(base, stem, "log")
     log_text = log_file.read_text(errors="replace") if log_file else output
     parsed = parse_log(log_text)
@@ -285,7 +299,7 @@ async def compile_project(pid: str, req: CompileReq):
 
 
 def _main_stem(pid: str) -> str:
-    return Path(read_meta(pid).get("main", "main.tex")).with_suffix("").name
+    return Path(read_meta(pid, with_modified=False).get("main", "main.tex")).with_suffix("").name
 
 
 @router.get("/pdf")
@@ -293,7 +307,8 @@ def get_pdf(pid: str):
     pdf = view_pdf(pid)
     if not pdf:
         raise HTTPException(404, "PDF not compiled yet")
-    return FileResponse(pdf, media_type="application/pdf", headers={"Cache-Control": "no-store"})
+    return FileResponse(pdf, media_type="application/pdf",
+                        headers={"Cache-Control": "no-store", "X-PDF-Mtime": str(pdf.stat().st_mtime)})
 
 
 @router.get("/pdf/download")

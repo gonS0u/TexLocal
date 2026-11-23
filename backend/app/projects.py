@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 import shutil
@@ -12,9 +13,10 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
-from .config import BUILD_DIR_NAME, ENGINES, PROJECTS_DIR
-from .paths import project_dir
+from .config import BUILD_DIR_NAME, ENGINES, PROJECTS_DIR, walk_files
+from .paths import atomic_write, project_dir
 
+log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
 META = "project.json"
@@ -145,7 +147,7 @@ def new_project_id(name: str) -> str:
     return pid
 
 
-def read_meta(pid: str) -> dict:
+def read_meta(pid: str, with_modified: bool = True) -> dict:
     d = project_dir(pid)
     meta = {"id": pid, "name": pid, "main": "main.tex", "engine": "pdflatex", "spell": "en_US"}
     f = d / META
@@ -153,19 +155,23 @@ def read_meta(pid: str) -> dict:
         try:
             meta.update(json.loads(f.read_text()))
         except json.JSONDecodeError:
-            pass
+            log.warning("corrupt %s in project %s", META, pid)
     meta["id"] = pid
-    meta["modified"] = max(
-        (p.stat().st_mtime for p in d.rglob("*") if BUILD_DIR_NAME not in p.parts and p.is_file()),
-        default=d.stat().st_mtime,
-    )
+    if with_modified:
+        newest = d.stat().st_mtime
+        for p in walk_files(d, hidden=True):
+            try:
+                newest = max(newest, p.stat().st_mtime)
+            except OSError:
+                pass
+        meta["modified"] = newest
     return meta
 
 
 def write_meta(pid: str, meta: dict) -> None:
     d = project_dir(pid)
     data = {k: meta[k] for k in ("name", "main", "engine", "spell", "created") if k in meta}
-    (d / META).write_text(json.dumps(data, indent=2, ensure_ascii=False))
+    atomic_write(d / META, json.dumps(data, indent=2, ensure_ascii=False))
 
 
 @router.get("")

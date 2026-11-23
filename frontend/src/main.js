@@ -12,6 +12,7 @@ import { openHistory } from './history.js';
 
 const app = document.getElementById('app');
 // Theme: stored choice, else follow the system preference.
+const TEXT_RE = /\.(tex|bib|sty|cls|bst|txt|md|csv|dat|tikz|bbx|cbx|lbx|cfg|def|ltx|dtx|ins|json|ya?ml|py|r|m|lua|svg|xml|log)$/i;
 const darkMq = matchMedia('(prefers-color-scheme: dark)');
 const applyTheme = () => { document.documentElement.dataset.theme = store.get('theme', null) || (darkMq.matches ? 'dark' : 'light'); };
 applyTheme();
@@ -53,6 +54,14 @@ function langSwitch() {
   return el('div', { class: 'lang-switch', role: 'group', 'aria-label': t('Interface language'), title: t('Interface language') }, en, pt);
 }
 
+// Every live theme switch re-syncs from one pair of global listeners (not one pair per switch).
+const themeSyncs = new Set();
+const syncThemeSwitches = () => {
+  for (const s of themeSyncs) { if (s.isConnected()) s.sync(); else themeSyncs.delete(s); }
+};
+document.addEventListener('themechange', syncThemeSwitches);
+darkMq.addEventListener('change', syncThemeSwitches);
+
 /** Light | Dark segmented control with visible text labels. */
 function themeSwitch() {
   const mk = (mode, label) => el('button', { type: 'button', onclick: () => { if (document.documentElement.dataset.theme !== mode) toggleTheme(); } }, label);
@@ -63,8 +72,7 @@ function themeSwitch() {
     dark.setAttribute('aria-pressed', String(isDark)); light.setAttribute('aria-pressed', String(!isDark));
   };
   sync();
-  document.addEventListener('themechange', sync);
-  darkMq.addEventListener('change', sync);
+  themeSyncs.add({ sync, isConnected: () => light.isConnected });
   return el('div', { class: 'lang-switch', role: 'group', 'aria-label': t('Light/dark theme'), title: t('Light/dark theme') }, light, dark);
 }
 const tbSep = () => el('span', { class: 'tb-sep', role: 'separator', 'aria-orientation': 'vertical' });
@@ -97,7 +105,7 @@ function downloadZip(pid) {
 function dropdown(btn, items) {
   document.querySelector('.dropdown-menu')?.remove();
   const r = btn.getBoundingClientRect();
-  const close = () => { m.remove(); document.removeEventListener('keydown', onKey, true); btn.setAttribute?.('aria-expanded', 'false'); };
+  const close = () => { m.remove(); document.removeEventListener('keydown', onKey, true); document.removeEventListener('click', close); btn.setAttribute?.('aria-expanded', 'false'); };
   const m = el('div', { class: 'context-menu dropdown-menu', role: 'menu', style: { top: `${r.bottom + 4}px`, right: `${Math.max(8, window.innerWidth - r.right)}px` } },
     ...items.map(([label, fn]) => el('div', { class: 'menu-item', role: 'menuitem', tabindex: '0', onclick: () => { close(); fn(); } }, label)));
   const onKey = (e) => {
@@ -112,7 +120,7 @@ function dropdown(btn, items) {
   btn.setAttribute?.('aria-expanded', 'true');
   document.addEventListener('keydown', onKey, true);
   m.querySelector('.menu-item')?.focus();
-  setTimeout(() => document.addEventListener('click', close, { once: true }));
+  setTimeout(() => { if (m.isConnected) document.addEventListener('click', close); });
 }
 
 /** Panel anchored under `btn` holding live controls; stays open while interacting inside it. */
@@ -120,7 +128,7 @@ function popover(btn, content) {
   const open = document.querySelector('.topbar-popover');
   if (open) { open.remove(); btn.setAttribute('aria-expanded', 'false'); if (open.dataset.owner === btn.id) return; }
   const r = btn.getBoundingClientRect();
-  const pop = el('div', { class: 'context-menu topbar-popover', role: 'dialog', 'aria-label': btn.textContent, 'data-owner': btn.id, style: { top: `${r.bottom + 4}px`, right: `${Math.max(8, window.innerWidth - r.right)}px` } }, content);
+  const pop = el('div', { class: 'context-menu topbar-popover', role: 'dialog', 'aria-label': btn.getAttribute('aria-label') || btn.textContent.replace(/[▾▸▴]/g, '').trim(), 'data-owner': btn.id || btn.textContent, style: { top: `${r.bottom + 4}px`, right: `${Math.max(8, window.innerWidth - r.right)}px` } }, content);
   const close = () => { pop.remove(); btn.setAttribute('aria-expanded', 'false'); document.removeEventListener('click', onDoc, true); document.removeEventListener('keydown', onKey, true); };
   const onDoc = (e) => { if (!pop.contains(e.target) && !btn.contains(e.target)) close(); };
   const onKey = (e) => { if (e.key === 'Escape') { close(); btn.focus(); } };
@@ -238,6 +246,7 @@ class ProjectView {
   constructor(pid) {
     this.pid = pid;
     this.symbols = null;
+    this.prefetched = new Map(); // path -> content fetched ahead of openFile
     this.tabs = [];
     this.compiling = false;
     this.pendingCompile = false;
@@ -261,9 +270,14 @@ class ProjectView {
   destroy() {
     window.removeEventListener('keydown', this.keyHandler, true);
     window.removeEventListener('beforeunload', this.beforeUnload);
-    this.pdf?.observer.disconnect();
+    this.pdf?.destroy();
     clearInterval(this.detachPoll);
     clearTimeout(this.outlineTimer);
+    clearTimeout(this.autoTimer);
+    clearTimeout(this.symTimer);
+    document.querySelector('.topbar-popover')?.remove();
+    this.tree?.destroy();
+    this.editor?.view.destroy();
     this.chan?.close();
   }
 
@@ -311,18 +325,24 @@ class ProjectView {
     document.title = `${this.meta.name} — LaTeX Local`;
     app.innerHTML = '';
     this.buildLayout();
+    // The PDF download and parse overlap with the tree and file requests.
+    const pdfReady = this.pdf.load(api.pdfUrl(this.pid)).catch(() => false);
     await this.tree.refresh();
     this.refreshSymbols();
     const saved = store.get(`open:${this.pid}`, null);
     const files = this.tree.allFiles();
     const toOpen = (saved?.tabs || []).filter((p) => files.includes(p));
     if (!toOpen.length && files.includes(this.meta.main)) toOpen.push(this.meta.main);
+    // Fetch every saved tab in parallel, then register them in order.
+    await Promise.all(toOpen.filter((p) => TEXT_RE.test(p) && !this.editor.has(p)).map(async (p) => {
+      try { this.prefetched.set(p, (await api.readFile(this.pid, p)).content); } catch { /* openFile reports it */ }
+    }));
     for (const p of toOpen) await this.openFile(p, { silent: true });
     const active = saved?.active && toOpen.includes(saved.active) ? saved.active : toOpen[0];
     if (active) await this.openFile(active);
-    try {
-      await this.pdf.load(api.pdfUrl(this.pid));
-    } catch { /* no pdf yet */ }
+    await pdfReady;
+    // Remember which PDF is already shown so the first compile does not download it again.
+    if (this.pdf.numPages && this.pdf.loadedMtime) this.pdfMtime = this.pdf.loadedMtime;
     this.compile();
   }
 
@@ -444,7 +464,7 @@ class ProjectView {
     });
 
     this.editor = new Editor(editorHost, {
-      onChange: () => { this.renderTabs(); this.scheduleAuto(); },
+      onChange: (_p, _dirty, flipped) => { if (flipped) this.renderTabs(); this.scheduleAuto(); },
       onUpdate: (docChanged) => this.updateOutline(docChanged),
       getSymbols: () => this.symbols && { ...this.symbols, files: this.tree.allFiles() },
       spell: { getLang: () => this.meta.spell || 'off' },
@@ -543,13 +563,15 @@ class ProjectView {
   persistTabs() { store.set(`open:${this.pid}`, { tabs: this.tabs, active: this.editor.current }); }
 
   async openFile(path, { line, column, silent } = {}) {
-    const isText = /\.(tex|bib|sty|cls|bst|txt|md|csv|dat|tikz|bbx|cbx|lbx|cfg|def|ltx|dtx|ins|json|ya?ml|py|r|m|lua|svg|xml|log)$/i.test(path);
+    const isText = TEXT_RE.test(path);
     if (!isText) { this.showImage(path); return; }
     this.imgPreview.classList.add('hidden');
     if (!this.editor.has(path)) {
       try {
-        const f = await api.readFile(this.pid, path);
-        this.editor.open(path, f.content);
+        let content = this.prefetched.get(path);
+        if (content === undefined) content = (await api.readFile(this.pid, path)).content;
+        this.prefetched.delete(path);
+        this.editor.open(path, content);
       } catch (e) { toast(e.message, 'error'); return; }
     }
     if (!this.tabs.includes(path)) this.tabs.push(path);
@@ -601,7 +623,7 @@ class ProjectView {
     }));
     if (dirty.length) {
       this.renderTabs();
-      this.refreshSymbols();
+      this.scheduleSymbols();
       api.snapshot(this.pid, '', true).catch(() => {});
     }
     return dirty.length;
@@ -699,6 +721,12 @@ class ProjectView {
     } catch (e) { toast(e.message, 'error'); }
   }
 
+  /** Debounced refresh: saves can come every second with auto-compile, and /symbols rescans the project. */
+  scheduleSymbols() {
+    clearTimeout(this.symTimer);
+    this.symTimer = setTimeout(() => this.refreshSymbols(), 2000);
+  }
+
   async refreshSymbols() {
     try { this.symbols = await api.symbols(this.pid); } catch { /* ignore */ }
   }
@@ -768,7 +796,7 @@ class DetachedPdfView {
     window.removeEventListener('keydown', this.keyHandler);
     window.removeEventListener('pagehide', this.bye);
     this.bye();
-    this.pdf?.observer.disconnect();
+    this.pdf?.destroy();
     this.chan.close();
   }
 }

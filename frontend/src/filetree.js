@@ -38,7 +38,13 @@ export class FileTree {
     });
     parent.append(toolbar, this.fileInput, this.folderInput, this.list);
     this.menu = null;
-    document.addEventListener('click', () => this.closeMenu());
+    this.onDocClick = () => this.closeMenu();
+    document.addEventListener('click', this.onDocClick);
+  }
+
+  destroy() {
+    document.removeEventListener('click', this.onDocClick);
+    this.closeMenu();
   }
 
   async refresh() {

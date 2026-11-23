@@ -65,7 +65,27 @@ def _source_files(base: Path):
             yield p, rel
 
 
+_hash_cache: dict[str, tuple[int, int, str]] = {}  # path -> (mtime_ns, size, sha)
+
+
 def _hash(p: Path) -> str:
+    """sha256 of a file, memoised on (mtime_ns, size) so unchanged files are not re-read."""
+    try:
+        st = p.stat()
+    except OSError:
+        return _hash_uncached(p)
+    key = str(p)
+    hit = _hash_cache.get(key)
+    if hit and hit[0] == st.st_mtime_ns and hit[1] == st.st_size:
+        return hit[2]
+    sha = _hash_uncached(p)
+    if len(_hash_cache) > 20000:
+        _hash_cache.clear()
+    _hash_cache[key] = (st.st_mtime_ns, st.st_size, sha)
+    return sha
+
+
+def _hash_uncached(p: Path) -> str:
     h = hashlib.sha256()
     with p.open("rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
@@ -85,6 +105,21 @@ def _versions(base: Path) -> list[dict]:
         except (OSError, ValueError):
             continue
     return out
+
+
+def _last_auto_time(base: Path) -> float | None:
+    """Time of the newest automatic version, parsing as few version files as possible."""
+    d = _hdir(base) / "versions"
+    if not d.is_dir():
+        return None
+    for f in sorted(d.glob("*.json"), reverse=True):
+        try:
+            v = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if v.get("auto"):
+            return v["time"]
+    return None
 
 
 def _load(base: Path, vid: str) -> dict:
@@ -112,12 +147,12 @@ def _gc(base: Path):
 
 def snapshot(base: Path, label: str = "", auto: bool = False, only_if_changed: bool = False) -> dict | None:
     """Store the current sources as a new version; None if nothing changed (or throttled, for auto)."""
-    vs = _versions(base)
     now = time.time()
     if auto:
-        last_auto = next((v for v in vs if v.get("auto")), None)
-        if last_auto and now - last_auto["time"] < AUTO_INTERVAL:
+        last = _last_auto_time(base)
+        if last is not None and now - last < AUTO_INTERVAL:
             return None
+    vs = _versions(base)
     files = {}
     for p, rel in _source_files(base):
         sha = _hash(p)

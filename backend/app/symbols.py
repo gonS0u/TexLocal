@@ -2,7 +2,7 @@ import re
 
 from fastapi import APIRouter
 
-from .config import BUILD_DIR_NAME
+from .config import walk_files
 from .paths import project_dir
 
 router = APIRouter(prefix="/api/projects/{pid}", tags=["symbols"])
@@ -17,8 +17,8 @@ DOCCLASS = re.compile(r"\\documentclass(?:\[[^\]]*\])?\{([^}]+)\}")
 
 
 def iter_files(base, exts):
-    for p in base.rglob("*"):
-        if p.is_file() and p.suffix.lower() in exts and BUILD_DIR_NAME not in p.parts and not any(x.startswith(".") for x in p.relative_to(base).parts):
+    for p in walk_files(base):
+        if p.suffix.lower() in exts:
             yield p
 
 

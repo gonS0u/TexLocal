@@ -32,3 +32,17 @@ def safe_path(base: Path, rel: str) -> Path:
     if p == base:
         raise HTTPException(400, "Invalid path")
     return p
+
+
+def atomic_write(p, text: str) -> None:
+    """Write text to p via a temp file + rename, so a crash never leaves a truncated file."""
+    import os
+    from pathlib import Path
+    p = Path(p)
+    tmp = p.with_name(f".{p.name}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    try:
+        os.replace(tmp, p)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise

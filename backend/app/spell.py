@@ -3,6 +3,7 @@ import asyncio
 import os
 import re
 import shutil
+import time
 import urllib.request
 from collections import OrderedDict
 from pathlib import Path
@@ -70,8 +71,30 @@ def hunspell_bin() -> str | None:
     return shutil.which("hunspell")
 
 
+_INSTALLED_TTL = 5.0
+_installed_cache: tuple[float, dict[str, dict]] | None = None
+
+
 def installed() -> dict[str, dict]:
-    """code -> {code, name, source, path (without extension)}; user dictionaries win over system ones."""
+    """code -> {code, name, source, path (without extension)}; user dictionaries win over system ones.
+
+    Cached for a few seconds: it is hit on every /check, and the directories rarely change.
+    """
+    global _installed_cache
+    now = time.monotonic()
+    if _installed_cache and now - _installed_cache[0] < _INSTALLED_TTL:
+        return _installed_cache[1]
+    out = _scan_installed()
+    _installed_cache = (now, out)
+    return out
+
+
+def invalidate_installed() -> None:
+    global _installed_cache
+    _installed_cache = None
+
+
+def _scan_installed() -> dict[str, dict]:
     out: dict[str, dict] = {}
     for src, dirs in (("system", SYSTEM_DIRS), ("user", [USER_DICTS])):
         for d in dirs:
@@ -90,16 +113,30 @@ def _personal_file(code: str) -> Path:
     return DATA_DIR / f"personal-{code}.txt"
 
 
+_personal_cache: dict[str, tuple[int, set[str]]] = {}  # code -> (mtime_ns, words)
+
+
 def personal_words(code: str) -> set[str]:
     f = _personal_file(code)
-    if not f.exists():
+    try:
+        mt = f.stat().st_mtime_ns
+    except OSError:
         return set()
-    return {w.strip() for w in f.read_text(encoding="utf-8").splitlines() if w.strip()}
+    hit = _personal_cache.get(code)
+    if hit and hit[0] == mt:
+        return set(hit[1])
+    words = {w.strip() for w in f.read_text(encoding="utf-8").splitlines() if w.strip()}
+    _personal_cache[code] = (mt, words)
+    return set(words)
 
 
 def _save_personal(code: str, words: set[str]) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    _personal_file(code).write_text("\n".join(sorted(words, key=str.lower)) + ("\n" if words else ""), encoding="utf-8")
+    f = _personal_file(code)
+    tmp = f.with_suffix(".tmp")
+    tmp.write_text("\n".join(sorted(words, key=str.lower)) + ("\n" if words else ""), encoding="utf-8")
+    os.replace(tmp, f)
+    _personal_cache.pop(code, None)
 
 
 class Speller:
@@ -125,10 +162,8 @@ class Speller:
         )
         await asyncio.wait_for(self.proc.stdout.readline(), timeout=20)  # banner
 
-    async def _ask(self, word: str) -> list[str] | None:
-        assert self.proc and self.proc.stdin and self.proc.stdout
-        self.proc.stdin.write(("^" + word + "\n").encode("utf-8"))
-        await self.proc.stdin.drain()
+    async def _read_answer(self) -> list[str] | None:
+        assert self.proc and self.proc.stdout
         bad, sugg = False, []
         while True:
             line = (await asyncio.wait_for(self.proc.stdout.readline(), timeout=20)).decode("utf-8", "replace").rstrip("\n")
@@ -141,6 +176,16 @@ class Speller:
             elif line[0] == "#":
                 bad = True
         return sugg[:8] if bad else None
+
+    async def _ask_batch(self, words: list[str]) -> list[list[str] | None]:
+        """Write a batch of words, then read one answer per word (avoids a round-trip each).
+
+        Batches stay small so hunspell's replies never fill the pipe while we are still writing.
+        """
+        assert self.proc and self.proc.stdin
+        self.proc.stdin.write("".join("^" + w + "\n" for w in words).encode("utf-8"))
+        await self.proc.stdin.drain()
+        return [await self._read_answer() for _ in words]
 
     async def check(self, words: list[str]) -> dict[str, list[str] | None]:
         res: dict[str, list[str] | None] = {}
@@ -158,10 +203,12 @@ class Speller:
                 for attempt in range(2):
                     try:
                         await self._ensure()
-                        for w in todo:
-                            if w not in res:
-                                res[w] = await self._ask(w)
-                                self.cache[w] = res[w]
+                        pending = [w for w in dict.fromkeys(todo) if w not in res]
+                        for i in range(0, len(pending), 100):
+                            chunk = pending[i:i + 100]
+                            for w, r in zip(chunk, await self._ask_batch(chunk)):
+                                res[w] = r
+                                self.cache[w] = r
                         break
                     except (asyncio.TimeoutError, BrokenPipeError, ConnectionResetError, AssertionError):
                         if self.proc and self.proc.returncode is None:
@@ -307,6 +354,7 @@ async def download(body: DownloadBody):
         for dest in parts:  # only publish once both files are complete
             dest.with_suffix(dest.suffix + ".part").replace(dest)
         SPELLERS.pop(body.code, None)
+        invalidate_installed()
         await job.emit(f"Installed {body.code} in {USER_DICTS}")
 
     job = await start_job(f"Download dictionary {body.code}", [], after=do)
@@ -325,4 +373,5 @@ def remove_language(code: str):
     sp = SPELLERS.pop(code, None)
     if sp:
         sp.close()
+    invalidate_installed()
     return {"ok": True}

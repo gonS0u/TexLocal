@@ -1,5 +1,6 @@
 """TeX package manager: tlmgr (user mode, no sudo) + apt (via pkexec)."""
 import asyncio
+import functools
 import json
 import os
 import re
@@ -31,6 +32,7 @@ def _check_names(names: list[str]) -> list[str]:
     return names
 
 
+@functools.lru_cache(maxsize=1)
 def texmfhome() -> Path:
     try:
         import subprocess
@@ -124,6 +126,9 @@ async def start_job(title: str, cmds: list[list[str]], after=None) -> Job:
             raise HTTPException(409, f"Already running: {_current.title}")
         job = Job(title, cmds, after)
         JOBS[job.id] = job
+        for old in sorted(JOBS.values(), key=lambda j: j.started, reverse=True)[20:]:
+            if old.done:
+                JOBS.pop(old.id, None)
         _current = job
         asyncio.create_task(job.run())
     return job
@@ -421,7 +426,7 @@ proj_router = APIRouter(prefix="/api/projects/{pid}", tags=["packages"])
 async def check_project(pid: str):
     base = project_dir(pid)
     wanted: dict[str, list[str]] = {}
-    local = {p.name for p in base.rglob("*") if p.suffix in (".sty", ".cls")}
+    local = {p.name for p in iter_files(base, {".sty", ".cls"})}
     for f in iter_files(base, {".tex"}):
         text = strip_comments(f.read_text(errors="replace"))
         rel = f.relative_to(base).as_posix()

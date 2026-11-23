@@ -1,3 +1,4 @@
+import os
 import shutil
 from pathlib import Path
 
@@ -6,7 +7,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from .config import BUILD_DIR_NAME
-from .paths import project_dir, safe_path
+from .paths import atomic_write, project_dir, safe_path
 from .projects import META
 
 router = APIRouter(prefix="/api/projects/{pid}", tags=["files"])
@@ -30,16 +31,32 @@ class FileMove(BaseModel):
     new_path: str
 
 
-def _tree(base: Path, d: Path) -> list:
+def _tree(base: Path, d: Path, _seen: frozenset = frozenset()) -> list:
+    """Directory listing; `_seen` holds the real paths of ancestors so symlink cycles stop."""
+    real = os.path.realpath(d)
+    if real in _seen:
+        return []
+    seen = _seen | {real}
+    entries = []
+    with os.scandir(d) as it:
+        for e in it:
+            if e.name in HIDDEN or e.name.startswith("."):
+                continue
+            try:
+                is_dir = e.is_dir()
+                size = 0 if is_dir else e.stat().st_size
+            except OSError:
+                continue  # broken symlink / vanished entry
+            entries.append((e, is_dir, size))
+    entries.sort(key=lambda x: (not x[1], x[0].name.lower()))
     items = []
-    for p in sorted(d.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
-        if p.name in HIDDEN or p.name.startswith("."):
-            continue
+    for e, is_dir, size in entries:
+        p = Path(e.path)
         rel = p.relative_to(base).as_posix()
-        if p.is_dir():
-            items.append({"name": p.name, "path": rel, "type": "folder", "children": _tree(base, p)})
+        if is_dir:
+            items.append({"name": e.name, "path": rel, "type": "folder", "children": _tree(base, p, seen)})
         else:
-            items.append({"name": p.name, "path": rel, "type": "file", "text": p.suffix.lower() in TEXT_EXT, "size": p.stat().st_size})
+            items.append({"name": e.name, "path": rel, "type": "file", "text": p.suffix.lower() in TEXT_EXT, "size": size})
     return items
 
 
@@ -84,7 +101,7 @@ def write_file(pid: str, body: FileWrite):
     p = safe_path(base, body.path)
     _guard(p, base)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(body.content, encoding="utf-8")
+    atomic_write(p, body.content)
     return {"ok": True, "mtime": p.stat().st_mtime}
 
 

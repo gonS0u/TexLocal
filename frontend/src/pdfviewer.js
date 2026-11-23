@@ -1,9 +1,18 @@
-import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
-import workerUrl from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url';
 import { el } from './api.js';
 import { t } from './i18n.js';
 
-pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
+// pdf.js is large: load it on first use so the editor does not wait for it to be parsed.
+let pdfjsPromise;
+function loadPdfjs() {
+  pdfjsPromise ||= Promise.all([
+    import('pdfjs-dist/build/pdf.mjs'),
+    import('pdfjs-dist/build/pdf.worker.min.mjs?url'),
+  ]).then(([lib, worker]) => {
+    lib.GlobalWorkerOptions.workerSrc = worker.default;
+    return lib;
+  }).catch((e) => { pdfjsPromise = null; throw e; });
+  return pdfjsPromise;
+}
 
 /**
  * Download a PDF. If it has no %%EOF trailer it may still be being written: retry once,
@@ -18,7 +27,7 @@ async function fetchPdf(url) {
     const head = String.fromCharCode(...data.subarray(0, 5));
     const tail = String.fromCharCode(...data.subarray(Math.max(0, data.length - 2048)));
     if (head !== '%PDF-') throw new Error('Not a PDF');
-    if (tail.includes('%%EOF') || attempt >= 1) return data;
+    if (tail.includes('%%EOF') || attempt >= 1) return { data, mtime: r.headers.get('X-PDF-Mtime') };
     await new Promise((res) => setTimeout(res, 500));
   }
 }
@@ -56,7 +65,17 @@ export class PdfViewer {
       if (this._raf) return;
       this._raf = requestAnimationFrame(() => { this._raf = 0; this.notifyPage(); });
     }, { passive: true });
-    new ResizeObserver(() => { if (this.fit === 'width' && this.pdf) this.debouncedRelayout(); }).observe(this.container);
+    this.resizeObs = new ResizeObserver(() => { if (this.fit === 'width' && this.pdf) this.debouncedRelayout(); });
+    this.resizeObs.observe(this.container);
+  }
+
+  destroy() {
+    this.observer.disconnect();
+    this.resizeObs.disconnect();
+    clearTimeout(this._rl);
+    if (this._raf) cancelAnimationFrame(this._raf);
+    this.task?.destroy().catch(() => {});
+    this.loadSeq = (this.loadSeq || 0) + 1; // abandon any load in flight
   }
 
   get px() { return (this.curScale || this.scale) * CSS_UNITS; }
@@ -79,7 +98,7 @@ export class PdfViewer {
     const stale = () => seq !== this.loadSeq;
     let task;
     try {
-      const data = await fetchPdf(url);
+      const [{ data, mtime }, pdfjsLib] = await Promise.all([fetchPdf(url), loadPdfjs()]);
       if (stale()) return true;
       task = pdfjsLib.getDocument({ data, isEvalSupported: false });
       const pdf = await task.promise;
@@ -93,6 +112,7 @@ export class PdfViewer {
       const old = this.task;
       this.task = task;
       this.pdf = pdf;
+      this.loadedMtime = mtime ? parseFloat(mtime) : null;
       this.sizes = sizes;
       await this.layout(false);
       if (anchor) this.restoreAnchor(anchor);
