@@ -41,15 +41,34 @@ function toggleTheme() {
   const dark = document.documentElement.dataset.theme === 'dark';
   document.documentElement.dataset.theme = dark ? 'light' : 'dark';
   store.set('theme', document.documentElement.dataset.theme);
+  document.dispatchEvent(new Event('themechange'));
 }
 
 /** EN | PT switch; changing language reloads the page (unsaved edits trigger the usual prompt). */
 function langSwitch() {
   const b = (code, label) => el('button', { class: getLang() === code ? 'active' : '', title: code === 'en' ? 'English' : 'Português (Portugal)', onclick: () => { if (getLang() !== code) { setLang(code); location.reload(); } } }, label);
-  return el('div', { class: 'lang-switch', title: t('Interface language') }, b('en', 'EN'), b('pt-PT', 'PT'));
+  const en = b('en', 'English'), pt = b('pt-PT', 'Português');
+  en.setAttribute('aria-pressed', String(getLang() === 'en'));
+  pt.setAttribute('aria-pressed', String(getLang() === 'pt-PT'));
+  return el('div', { class: 'lang-switch', role: 'group', 'aria-label': t('Interface language'), title: t('Interface language') }, en, pt);
 }
 
-const themeBtn = () => el('button', { class: 'btn ghost', title: t('Light/dark theme'), onclick: toggleTheme }, '◐');
+/** Light | Dark segmented control with visible text labels. */
+function themeSwitch() {
+  const mk = (mode, label) => el('button', { type: 'button', onclick: () => { if (document.documentElement.dataset.theme !== mode) toggleTheme(); } }, label);
+  const light = mk('light', t('Light')), dark = mk('dark', t('Dark'));
+  const sync = () => {
+    const isDark = document.documentElement.dataset.theme === 'dark';
+    dark.classList.toggle('active', isDark); light.classList.toggle('active', !isDark);
+    dark.setAttribute('aria-pressed', String(isDark)); light.setAttribute('aria-pressed', String(!isDark));
+  };
+  sync();
+  document.addEventListener('themechange', sync);
+  darkMq.addEventListener('change', sync);
+  return el('div', { class: 'lang-switch', role: 'group', 'aria-label': t('Light/dark theme'), title: t('Light/dark theme') }, light, dark);
+}
+const tbSep = () => el('span', { class: 'tb-sep', role: 'separator', 'aria-orientation': 'vertical' });
+const tbGroup = (label, ...kids) => el('div', { class: 'tb-group', role: 'group', 'aria-label': label }, ...kids);
 
 function openProject(p) {
   location.hash = `#/p/${encodeURIComponent(p.id)}`;
@@ -74,14 +93,41 @@ function downloadZip(pid) {
   a.remove();
 }
 
-/** Small drop-down menu anchored under `btn`; closes on any outside click. */
+/** Small drop-down menu anchored under `btn`; closes on outside click or Esc; arrow keys move between items. */
 function dropdown(btn, items) {
   document.querySelector('.dropdown-menu')?.remove();
   const r = btn.getBoundingClientRect();
-  const m = el('div', { class: 'context-menu dropdown-menu', style: { top: `${r.bottom + 4}px`, right: `${Math.max(8, window.innerWidth - r.right)}px` } },
-    ...items.map(([label, fn]) => el('div', { class: 'menu-item', onclick: () => { m.remove(); fn(); } }, label)));
+  const close = () => { m.remove(); document.removeEventListener('keydown', onKey, true); btn.setAttribute?.('aria-expanded', 'false'); };
+  const m = el('div', { class: 'context-menu dropdown-menu', role: 'menu', style: { top: `${r.bottom + 4}px`, right: `${Math.max(8, window.innerWidth - r.right)}px` } },
+    ...items.map(([label, fn]) => el('div', { class: 'menu-item', role: 'menuitem', tabindex: '0', onclick: () => { close(); fn(); } }, label)));
+  const onKey = (e) => {
+    const its = [...m.querySelectorAll('.menu-item')];
+    const i = its.indexOf(document.activeElement);
+    if (e.key === 'Escape') { e.preventDefault(); close(); btn.focus?.(); }
+    else if (e.key === 'ArrowDown') { e.preventDefault(); its[(i + 1) % its.length].focus(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); its[(i - 1 + its.length) % its.length].focus(); }
+    else if ((e.key === 'Enter' || e.key === ' ') && i >= 0) { e.preventDefault(); its[i].click(); }
+  };
   document.body.append(m);
-  setTimeout(() => document.addEventListener('click', () => m.remove(), { once: true }));
+  btn.setAttribute?.('aria-expanded', 'true');
+  document.addEventListener('keydown', onKey, true);
+  m.querySelector('.menu-item')?.focus();
+  setTimeout(() => document.addEventListener('click', close, { once: true }));
+}
+
+/** Panel anchored under `btn` holding live controls; stays open while interacting inside it. */
+function popover(btn, content) {
+  const open = document.querySelector('.topbar-popover');
+  if (open) { open.remove(); btn.setAttribute('aria-expanded', 'false'); if (open.dataset.owner === btn.id) return; }
+  const r = btn.getBoundingClientRect();
+  const pop = el('div', { class: 'context-menu topbar-popover', role: 'dialog', 'aria-label': btn.textContent, 'data-owner': btn.id, style: { top: `${r.bottom + 4}px`, right: `${Math.max(8, window.innerWidth - r.right)}px` } }, content);
+  const close = () => { pop.remove(); btn.setAttribute('aria-expanded', 'false'); document.removeEventListener('click', onDoc, true); document.removeEventListener('keydown', onKey, true); };
+  const onDoc = (e) => { if (!pop.contains(e.target) && !btn.contains(e.target)) close(); };
+  const onKey = (e) => { if (e.key === 'Escape') { close(); btn.focus(); } };
+  document.body.append(pop);
+  btn.setAttribute('aria-expanded', 'true');
+  document.addEventListener('click', onDoc, true);
+  document.addEventListener('keydown', onKey, true);
 }
 
 // ------------------------------------------------------------------ import
@@ -158,9 +204,10 @@ async function showProjects() {
     el('header', { class: 'topbar' },
       el('div', { class: 'brand' }, el('span', { class: 'logo' }, 'TeX'), 'LaTeX Local'),
       el('div', { class: 'spacer' }),
-      el('button', { class: 'btn ghost', onclick: () => pm.open('settings') }, '📦 ' + t('Packages')),
+      el('button', { class: 'btn ghost', onclick: () => pm.open('settings') }, t('Packages')),
+      tbSep(),
       langSwitch(),
-      themeBtn()),
+      themeSwitch()),
     el('main', { class: 'projects-page' },
       el('section', { class: 'new-project' }, el('h2', {}, t('New project')),
         el('div', { class: 'row' }, name, tpl, lang, el('button', { class: 'btn primary', onclick: create }, t('Create')))),
@@ -283,7 +330,7 @@ class ProjectView {
     this.engineSel = el('select', { title: t('Compiler engine'), onchange: async () => { this.meta = await api.updateProject(this.pid, { engine: this.engineSel.value }); this.compile(); } },
       ...['pdflatex', 'xelatex', 'lualatex'].map((e) => el('option', { value: e, selected: this.meta.engine === e }, e)));
     this.compileBtn = el('button', { class: 'btn primary compile-btn', onclick: () => this.saveAndCompile(), title: t('Save and compile (Ctrl+S)') }, '▶ ' + t('Compile'));
-    this.statusEl = el('span', { class: 'status' });
+    this.statusEl = el('button', { type: 'button', class: 'status' });
     const autoCb = el('input', { type: 'checkbox', checked: this.autoCompile, onchange: () => { this.autoCompile = autoCb.checked; store.set('autocompile', this.autoCompile); } });
     this.autoCb = autoCb;
     this.spellSel = el('select', { class: 'spell-select', title: t('Spell-check language'), onchange: () => this.setSpell(this.spellSel.value) });
@@ -291,25 +338,38 @@ class ProjectView {
     const wrapCb = el('input', { type: 'checkbox', checked: store.get('wrap', true), onchange: () => { this.editor.setWrap(wrapCb.checked); store.set('wrap', wrapCb.checked); } });
     this.wrapCb = wrapCb;
 
-    const top = el('header', { class: 'topbar' },
-      el('a', { class: 'brand', href: '#' }, el('span', { class: 'logo' }, 'TeX'), ''),
-      el('span', { class: 'project-name', title: t('Rename'), onclick: async () => { const n = prompt(t('Project name:'), this.meta.name); if (n) { this.meta = await api.updateProject(this.pid, { name: n }); top.querySelector('.project-name').textContent = this.meta.name; } } }, this.meta.name),
-      el('div', { class: 'spacer' }),
-      this.compileBtn,
-      this.engineSel,
-      el('label', { class: 'check', title: t('Compile automatically ~1s after you stop typing') }, autoCb, t('Auto')),
+    this.fontLabel = el('span', { class: 'font-size-label' }, `${store.get('fontSize', 14)}px`);
+    const viewPanel = el('div', { class: 'view-panel' },
       el('label', { class: 'check', title: t('Wrap lines in the editor') }, wrapCb, t('Wrap')),
-      this.spellSel,
-      el('button', { class: 'icon-btn', title: t('Smaller font'), onclick: () => this.fontSize(-1) }, 'A−'),
-      el('button', { class: 'icon-btn', title: t('Larger font'), onclick: () => this.fontSize(1) }, 'A+'),
-      this.statusEl,
-      el('button', { class: 'btn ghost', onclick: () => pm.open('missing', this.lastResult?.missing || []) }, '📦 ' + t('Packages')),
-      el('a', { class: 'btn ghost', href: api.pdfDownloadUrl(this.pid), title: t('Download PDF') }, '⬇ PDF'),
-      el('button', { class: 'btn ghost', title: t('Version history'), onclick: () => this.openHistory() }, '🕘 ' + t('History')),
-      el('button', { class: 'btn ghost project-menu-btn', onclick: (e) => { e.stopPropagation(); this.projectMenu(e.currentTarget); } }, t('Project') + ' ▾'),
-      langSwitch(),
-      themeBtn(),
-      el('button', { class: 'btn ghost help-btn', title: t('Help and shortcuts (F1)'), onclick: () => this.openHelp() }, '?'),
+      el('div', { class: 'view-row' }, el('span', { class: 'muted' }, t('Spell-check language')), this.spellSel),
+      el('div', { class: 'view-row' }, el('span', { class: 'muted' }, t('Font size')),
+        el('span', { class: 'font-ctl' },
+          el('button', { type: 'button', class: 'btn small', title: t('Smaller font'), 'aria-label': t('Smaller font'), onclick: () => this.fontSize(-1) }, '−'),
+          this.fontLabel,
+          el('button', { type: 'button', class: 'btn small', title: t('Larger font'), 'aria-label': t('Larger font'), onclick: () => this.fontSize(1) }, '+'))));
+    const viewBtn = el('button', { type: 'button', id: 'view-btn', class: 'btn ghost', 'aria-haspopup': 'dialog', 'aria-expanded': 'false', title: t('Editor display options'), onclick: (e) => { e.stopPropagation(); popover(viewBtn, viewPanel); } }, t('View') + ' ▾');
+
+    const top = el('header', { class: 'topbar' },
+      el('a', { class: 'brand', href: '#', title: t('Back to all projects') }, el('span', { class: 'logo' }, 'TeX'), el('span', { class: 'brand-text' }, t('Projects'))),
+      el('button', { type: 'button', class: 'project-name', title: t('Rename'), onclick: async () => { const n = prompt(t('Project name:'), this.meta.name); if (n) { this.meta = await api.updateProject(this.pid, { name: n }); top.querySelector('.project-name').textContent = this.meta.name; } } }, this.meta.name),
+      tbSep(),
+      tbGroup(t('Compile'),
+        this.compileBtn,
+        this.statusEl,
+        this.engineSel,
+        el('label', { class: 'check', title: t('Compile automatically ~1s after you stop typing') }, autoCb, t('Auto'))),
+      el('div', { class: 'spacer' }),
+      tbGroup(t('Project'),
+        el('button', { type: 'button', class: 'btn ghost', onclick: () => pm.open('missing', this.lastResult?.missing || []) }, t('Packages')),
+        el('a', { class: 'btn ghost', href: api.pdfDownloadUrl(this.pid), title: t('Download PDF') }, t('Download PDF')),
+        el('button', { type: 'button', class: 'btn ghost', title: t('Version history'), onclick: () => this.openHistory() }, t('History')),
+        el('button', { type: 'button', class: 'btn ghost project-menu-btn', 'aria-haspopup': 'menu', 'aria-expanded': 'false', onclick: (e) => { e.stopPropagation(); this.projectMenu(e.currentTarget); } }, t('Project') + ' ▾')),
+      tbSep(),
+      tbGroup(t('Preferences'),
+        viewBtn,
+        langSwitch(),
+        themeSwitch(),
+        el('button', { type: 'button', class: 'btn ghost help-btn', title: t('Help and shortcuts (F1)'), onclick: () => this.openHelp() }, t('Help'))),
     );
 
     const treeHost = el('div', { class: 'tree-host' });
@@ -593,7 +653,7 @@ class ProjectView {
         else toast(t('Could not refresh the PDF; showing the previous version.'), 'error');
       }
       if (r.errors.length && !this.sizes.logOpen) this.setLogOpen(true);
-      if (r.missing?.length) toast(t('Missing packages: {list} — open 📦 Packages', { list: r.missing.map((m) => m.file).join(', ') }), 'error', 6000);
+      if (r.missing?.length) toast(t('Missing packages: {list} — open Packages', { list: r.missing.map((m) => m.file).join(', ') }), 'error', 6000);
     } catch (e) {
       this.statusEl.className = 'status err';
       this.statusEl.textContent = '✗ ' + t('failed');
@@ -610,6 +670,7 @@ class ProjectView {
     const v = Math.max(10, Math.min(28, store.get('fontSize', 14) + delta));
     store.set('fontSize', v);
     document.documentElement.style.setProperty('--editor-font-size', `${v}px`);
+    if (this.fontLabel) this.fontLabel.textContent = `${v}px`;
     this.editor.view.requestMeasure();
   }
 
